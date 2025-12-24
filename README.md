@@ -98,14 +98,54 @@ echo '{"firstName":"John","lastName":"Doe",...}' | python3 -m greenhouse_automat
 
 ### Optional Fields
 
+**Basic Information:**
 - `preferredFirstName` (string): Preferred first name
 - `phone` (string): Phone number
 - `country` (string): Country name
 - `coverLetterPath` (string): Path to cover letter file
+
+**Online Profiles:**
 - `linkedinProfile` (string): LinkedIn profile URL
+- `githubProfile` (string): GitHub profile URL
+- `portfolio` (string): Portfolio URL
 - `website` (string): Personal website URL
 
+**Education** (array of objects, can have multiple):
+- `education` (array): List of education entries
+  - `school` (string): School/University name
+  - `degree` (string): Degree type (e.g., "Bachelor's Degree", "Master's Degree")
+  - `discipline` (string): Field of study (e.g., "Computer Science")
+  - `startMonth` (string): Start month (e.g., "08" for August)
+  - `startYear` (string): Start year (e.g., "2020")
+  - `endMonth` (string, optional): End month
+  - `endYear` (string, optional): End year
+
+**Employment** (array of objects, can have multiple):
+- `employment` (array): List of employment entries
+  - `company` (string): Company name
+  - `title` (string): Job title
+  - `startMonth` (string): Start month (e.g., "06" for June)
+  - `startYear` (string): Start year (e.g., "2024")
+  - `endMonth` (string, optional): End month (null if current role)
+  - `endYear` (string, optional): End year (null if current role)
+  - `currentRole` (boolean): true if this is your current role
+
+**Voluntary Self-Identification:**
+- `gender` (string): Gender (e.g., "Male", "Female", "Non-binary")
+- `hispanicLatino` (string): "yes", "no", or "do not wish to answer"
+- `veteranStatus` (string): Veteran status
+- `disabilityStatus` (string): Disability status
+
+**Work Preferences:**
+- `languages` (array): List of languages spoken (up to 5, e.g., ["English", "Hindi"])
+- `employmentTypes` (string): Employment type (e.g., "Full-time", "Part-time", "Contract")
+- `worksites` (string): Worksite preference (e.g., "Remote", "Hybrid", "On-site")
+- `location` (string): Location preference
+- `willingToRelocate` (boolean): true if willing to relocate
+
 ## Example
+
+See `input_example_full.json` for a complete example with all fields. Basic example:
 
 ```json
 {
@@ -119,7 +159,31 @@ echo '{"firstName":"John","lastName":"Doe",...}' | python3 -m greenhouse_automat
     "country": "United States",
     "coverLetterPath": "./cover_letters/didi_cover_letter.pdf",
     "linkedinProfile": "https://www.linkedin.com/in/janesmith",
-    "website": "https://janesmith.dev"
+    "githubProfile": "https://github.com/janesmith",
+    "website": "https://janesmith.dev",
+    "education": [
+        {
+            "school": "University Name",
+            "degree": "Bachelor's Degree",
+            "discipline": "Computer Science",
+            "startMonth": "08",
+            "startYear": "2020",
+            "endMonth": "05",
+            "endYear": "2024"
+        }
+    ],
+    "employment": [
+        {
+            "company": "Company Name",
+            "title": "Software Engineer",
+            "startMonth": "06",
+            "startYear": "2024",
+            "currentRole": true
+        }
+    ],
+    "languages": ["English"],
+    "employmentTypes": "Full-time",
+    "willingToRelocate": true
 }
 ```
 
