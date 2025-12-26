@@ -32,7 +32,7 @@ class GreenhouseSelectors:
     # React Select components - use the input inside select__control
     COUNTRY = 'input[id="country"], input[id*="country"].select__input, div.select__control:has(input[id*="country"]) input'
     LOCATION_CITY = 'input[id="candidate-location"], input[id*="candidate-location"], input[id*="location"].select__input, div.select__control:has(input[id*="location"]) input'
-    LOCATE_ME_BUTTON = 'button.btn--tertiary, button:contains("Locate me")'
+    LOCATE_ME_BUTTON = 'button[class*="locate"], button:contains("Locate me"), button:contains("Locate Me"), button[aria-label*="Locate"], a[class*="locate"], button.btn--tertiary'
     
     # Online profiles
     LINKEDIN = 'input[id="question_29030630003"], input[id*="linkedin"], input[name*="linkedin"], input[placeholder*="LinkedIn"]'

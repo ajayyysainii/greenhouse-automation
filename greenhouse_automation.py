@@ -186,13 +186,18 @@ class GreenhouseAutomation:
             # Location (City) - required in some forms
             # Location (City) - React Select dropdown
             if application_input.location_city:
-                self._fill_dropdown(
+                location_filled = self._fill_dropdown(
                     selectors=[GreenhouseSelectors.LOCATION_CITY],
                     value=application_input.location_city,
                     field_name="Location (City)",
                     required=False,
                     silent=True
                 )
+                
+                # If location city was not filled, try clicking "Locate me" button as fallback
+                if not location_filled:
+                    self.logger.info("Location city not filled, trying 'Locate me' button as fallback...")
+                    self._click_locate_me_button()
             
             # Cover Letter upload
             if application_input.cover_letter_path:
@@ -282,15 +287,22 @@ class GreenhouseAutomation:
             submit_success = self._submit_form()
             
             if submit_success:
-                sleep(MEDIUM_WAIT)  # Wait for submission to process
                 return ApplicationResult(
                     status="success",
                     message="Application submitted successfully"
                 )
             else:
+                # Take a screenshot for debugging
+                try:
+                    if take_screenshot:
+                        take_screenshot(self.driver, "greenhouse_submission_failed.png")
+                        self.logger.info("Screenshot saved as greenhouse_submission_failed.png")
+                except:
+                    pass
+                
                 return ApplicationResult(
                     status="error",
-                    message="Failed to submit application form"
+                    message="Failed to submit application form - submission could not be verified"
                 )
                 
         except Exception as e:
@@ -421,18 +433,7 @@ class GreenhouseAutomation:
                             sleep(0.8)  # Wait for menu to appear
                             
                             # React Select menu options are typically in a menu with role="listbox" or class="select__menu"
-                            value_lower = value.lower()
-                            # For long text options, try exact match first, then partial match
-                            option_selectors = [
-                                # Exact match (case-insensitive)
-                                f"//div[contains(@class, 'select__menu')]//div[@role='option' and translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='{value_lower}']",
-                                f"//div[@role='listbox']//div[@role='option' and translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='{value_lower}']",
-                                # Partial match (contains)
-                                f"//div[contains(@class, 'select__menu')]//div[contains(@class, 'option') and contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
-                                f"//div[@role='listbox']//div[@role='option' and contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
-                                f"//div[contains(@class, 'select__menu')]//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
-                                f"//div[@id='react-select-{element.get_attribute('id')}-listbox']//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]"
-                            ]
+                            value_lower = value.lower().strip()
                             
                             # First check if menu is open and has options
                             try:
@@ -444,26 +445,83 @@ class GreenhouseAutomation:
                             except:
                                 pass
                             
-                            for option_selector in option_selectors:
+                            # Get all available options from the dropdown
+                            all_option_selectors = [
+                                "//div[contains(@class, 'select__menu')]//div[@role='option']",
+                                "//div[@role='listbox']//div[@role='option']",
+                                "//div[contains(@class, 'select__menu')]//div[contains(@class, 'option')]",
+                                f"//div[@id='react-select-{element.get_attribute('id')}-listbox']//div[@role='option']"
+                            ]
+                            
+                            all_options = []
+                            for selector in all_option_selectors:
                                 try:
-                                    options = self.driver.find_elements(By.XPATH, option_selector)
+                                    options = self.driver.find_elements(By.XPATH, selector)
                                     visible_options = [opt for opt in options if opt.is_displayed()]
-                                    
-                                    if not visible_options:
-                                        continue  # Try next selector
-                                    
-                                    for option in visible_options:
-                                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
-                                        sleep(0.2)
-                                        try:
-                                            option.click()
-                                        except:
-                                            self.driver.execute_script("arguments[0].click();", option)
-                                        sleep(0.5)
-                                        self.logger.info(f"Selected '{value}' in {field_name} (React Select)")
-                                        return True
+                                    if visible_options:
+                                        all_options = visible_options
+                                        break
                                 except:
                                     continue
+                            
+                            if not all_options:
+                                self.logger.info(f"No options found in dropdown for '{value}' in {field_name}")
+                                return False
+                            
+                            # Go through all options and find exact matches first
+                            exact_matches = []
+                            partial_matches = []
+                            
+                            for option in all_options:
+                                try:
+                                    option_text = option.text.strip()
+                                    option_text_lower = option_text.lower().strip()
+                                    
+                                    # Check for exact match (case-insensitive)
+                                    if option_text_lower == value_lower:
+                                        exact_matches.append((option, option_text))
+                                    # Check for partial match (contains)
+                                    elif value_lower in option_text_lower:
+                                        partial_matches.append((option, option_text))
+                                except:
+                                    continue
+                            
+                            # Prioritize exact matches
+                            if exact_matches:
+                                self.logger.info(f"Found {len(exact_matches)} exact match(es) for '{value}' in {field_name}")
+                                # Select the first exact match
+                                option, option_text = exact_matches[0]
+                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
+                                sleep(0.2)
+                                try:
+                                    option.click()
+                                except:
+                                    self.driver.execute_script("arguments[0].click();", option)
+                                sleep(0.5)
+                                self.logger.info(f"Selected exact match '{option_text}' for '{value}' in {field_name}")
+                                return True
+                            
+                            # If no exact match, try partial matches
+                            if partial_matches:
+                                self.logger.info(f"Found {len(partial_matches)} partial match(es) for '{value}' in {field_name}")
+                                # Select the first partial match
+                                option, option_text = partial_matches[0]
+                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
+                                sleep(0.2)
+                                try:
+                                    option.click()
+                                except:
+                                    self.driver.execute_script("arguments[0].click();", option)
+                                sleep(0.5)
+                                self.logger.info(f"Selected partial match '{option_text}' for '{value}' in {field_name}")
+                                return True
+                            
+                            # If no matches found, log all available options for debugging
+                            try:
+                                available_options = [opt.text.strip() for opt in all_options[:10]]  # First 10 options
+                                self.logger.info(f"No match found for '{value}'. Available options: {available_options}")
+                            except:
+                                pass
                             
                             # If we get here, no options were found
                             # Check one more time if menu is empty
@@ -493,30 +551,56 @@ class GreenhouseAutomation:
                                         self.logger.info(f"No options found for '{value}' in {field_name}")
                                         return False  # Return False to trigger fallback
                                     
-                                    # Try to find options
-                                    all_options = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'select__menu')]//div[@role='option']")
-                                    visible_options = [opt for opt in all_options if opt.is_displayed()]
+                                    # Get all filtered options after typing
+                                    filtered_options = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'select__menu')]//div[@role='option']")
+                                    visible_filtered = [opt for opt in filtered_options if opt.is_displayed()]
                                     
-                                    if not visible_options:
+                                    if not visible_filtered:
                                         # No visible options found
                                         self.logger.info(f"No visible options found for '{value}' in {field_name}")
                                         return False  # Return False to trigger fallback
                                     
-                                    # Look for options that match the value
-                                    matching_options = self.driver.find_elements(By.XPATH, f"//div[contains(@class, 'select__menu')]//div[@role='option' and contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value.lower()}')]")
-                                    visible_matching = [opt for opt in matching_options if opt.is_displayed()]
+                                    # Go through all filtered options and find exact matches first
+                                    exact_matches = []
+                                    partial_matches = []
                                     
-                                    if visible_matching:
-                                        visible_matching[0].click()
+                                    for option in visible_filtered:
+                                        try:
+                                            option_text = option.text.strip()
+                                            option_text_lower = option_text.lower().strip()
+                                            
+                                            # Check for exact match (case-insensitive)
+                                            if option_text_lower == value_lower:
+                                                exact_matches.append((option, option_text))
+                                            # Check for partial match (contains)
+                                            elif value_lower in option_text_lower:
+                                                partial_matches.append((option, option_text))
+                                        except:
+                                            continue
+                                    
+                                    # Prioritize exact matches
+                                    if exact_matches:
+                                        self.logger.info(f"Found {len(exact_matches)} exact match(es) after typing '{value}' in {field_name}")
+                                        option, option_text = exact_matches[0]
+                                        option.click()
                                         sleep(0.3)
-                                        self.logger.info(f"Selected matching option for '{value}' in {field_name}")
+                                        self.logger.info(f"Selected exact match '{option_text}' for '{value}' in {field_name}")
                                         return True
                                     
-                                    # If no match, try first option
-                                    if visible_options:
-                                        visible_options[0].click()
+                                    # If no exact match, try partial matches
+                                    if partial_matches:
+                                        self.logger.info(f"Found {len(partial_matches)} partial match(es) after typing '{value}' in {field_name}")
+                                        option, option_text = partial_matches[0]
+                                        option.click()
                                         sleep(0.3)
-                                        self.logger.info(f"Selected first option for '{value}' in {field_name}")
+                                        self.logger.info(f"Selected partial match '{option_text}' for '{value}' in {field_name}")
+                                        return True
+                                    
+                                    # If no match, try first visible option
+                                    if visible_filtered:
+                                        visible_filtered[0].click()
+                                        sleep(0.3)
+                                        self.logger.info(f"Selected first filtered option for '{value}' in {field_name}")
                                         return True
                                     else:
                                         # No options available
@@ -611,9 +695,128 @@ class GreenhouseAutomation:
                 self.logger.info(f"Optional dropdown not found (skipping): {field_name}")
             return not required
     
+    def _verify_submission(self, original_url: str) -> bool:
+        """Verify that the form was actually submitted successfully"""
+        self.logger.info("Verifying form submission...")
+        
+        # Wait for page to process submission
+        sleep(3)
+        
+        try:
+            current_url = self.driver.current_url
+            
+            # Check if URL changed (indicates navigation to success page)
+            if current_url != original_url:
+                self.logger.info(f"URL changed from {original_url[:50]}... to {current_url[:50]}...")
+                # Check for success indicators in new URL
+                if any(indicator in current_url.lower() for indicator in ['success', 'thank', 'confirm', 'complete', 'submitted']):
+                    self.logger.success("Form submitted successfully (URL indicates success)")
+                    return True
+            
+            # Check for success messages on the page
+            success_indicators = [
+                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'thank you')]",
+                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application received')]",
+                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'successfully submitted')]",
+                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submitted successfully')]",
+                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'application complete')]",
+                "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'we received your application')]",
+                "//*[contains(@class, 'success')]",
+                "//*[contains(@class, 'thank-you')]",
+                "//*[contains(@id, 'success')]"
+            ]
+            
+            for indicator in success_indicators:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, indicator)
+                    for elem in elements:
+                        if elem.is_displayed():
+                            text = elem.text.lower()
+                            if any(word in text for word in ['thank', 'success', 'received', 'submitted', 'complete']):
+                                self.logger.success(f"Form submitted successfully (found success message: {elem.text[:50]}...)")
+                                return True
+                except:
+                    continue
+            
+            # Check for error messages (validation errors)
+            error_indicators = [
+                "//*[contains(@class, 'error')]",
+                "//*[contains(@class, 'validation')]",
+                "//*[contains(@class, 'required')]",
+                "//*[contains(text(), 'required')]",
+                "//*[contains(text(), 'please')]",
+                "//*[contains(text(), 'invalid')]",
+                "//*[contains(@role, 'alert')]"
+            ]
+            
+            for indicator in error_indicators:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, indicator)
+                    for elem in elements:
+                        if elem.is_displayed():
+                            text = elem.text.lower()
+                            # Check if it's actually an error (not just a class name)
+                            if text and any(word in text for word in ['error', 'required', 'invalid', 'please', 'missing']):
+                                self.logger.warning(f"Found validation error: {elem.text[:100]}")
+                                return False
+                except:
+                    continue
+            
+            # Check if submit button still exists (form not submitted)
+            submit_button_selectors = [
+                'button[type="submit"]',
+                'input[type="submit"]',
+                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit')]",
+                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]"
+            ]
+            
+            for selector in submit_button_selectors:
+                try:
+                    if selector.startswith("//"):
+                        elements = self.driver.find_elements(By.XPATH, selector)
+                    else:
+                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    
+                    for elem in elements:
+                        if elem.is_displayed() and elem.is_enabled():
+                            self.logger.warning("Submit button still visible and enabled - form may not have been submitted")
+                            return False
+                except:
+                    continue
+            
+            # Check if form fields are still present and editable (form not submitted)
+            try:
+                form_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[type='email'], textarea")
+                if form_inputs:
+                    # If we still have many form inputs visible, form might not be submitted
+                    visible_inputs = [inp for inp in form_inputs if inp.is_displayed()]
+                    if len(visible_inputs) > 5:  # If more than 5 visible inputs, form likely still present
+                        self.logger.warning(f"Form still appears to be present ({len(visible_inputs)} visible inputs)")
+                        return False
+            except:
+                pass
+            
+            # If we can't determine, wait a bit more and check URL again
+            sleep(2)
+            final_url = self.driver.current_url
+            if final_url != original_url:
+                self.logger.success("Form submitted successfully (URL changed after wait)")
+                return True
+            
+            # If we get here, we're not sure - log warning
+            self.logger.warning("Could not definitively verify submission. Form may or may not have been submitted.")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error verifying submission: {str(e)}")
+            return False
+    
     def _submit_form(self) -> bool:
-        """Submit the application form"""
+        """Submit the application form and verify submission"""
         self.logger.info("Looking for submit button...")
+        
+        # Store original URL for verification
+        original_url = self.driver.current_url
         
         # Scroll to bottom to ensure submit button is visible
         try:
@@ -638,6 +841,8 @@ class GreenhouseAutomation:
             'button[aria-label*="submit"]'
         ]
         
+        submit_clicked = False
+        
         for selector in css_selectors:
             element = self.helper.safe_find_element_by_css(selector, timeout=2)
             if element:
@@ -648,107 +853,118 @@ class GreenhouseAutomation:
                     # Try regular click first
                     if element.is_displayed() and element.is_enabled():
                         element.click()
-                        self.logger.success(f"Clicked submit button using selector: {selector}")
-                        return True
+                        self.logger.info(f"Clicked submit button using selector: {selector}")
+                        submit_clicked = True
+                        break
                     # If not enabled, try JavaScript click
                     self.driver.execute_script("arguments[0].click();", element)
-                    self.logger.success(f"Clicked submit button (JS) using selector: {selector}")
-                    return True
+                    self.logger.info(f"Clicked submit button (JS) using selector: {selector}")
+                    submit_clicked = True
+                    break
                 except Exception as e:
                     self.logger.info(f"Failed to click with selector {selector}: {str(e)}")
                     continue
         
-        # Try finding by text content using XPath (case-insensitive)
-        xpath_selectors = [
-            "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit')]",
-            "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit application')]",
-            "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]",
-            "//input[@type='submit']",
-            "//button[@type='submit']",
-            "//a[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit')]",
-            "//button[normalize-space(text())='Submit']",
-            "//button[normalize-space(text())='Submit application']",
-            "//button[normalize-space(text())='Apply']"
-        ]
-        
-        for xpath in xpath_selectors:
-            element = self.helper.safe_find_element(By.XPATH, xpath, timeout=2)
-            if element:
-                try:
-                    # Scroll element into view
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                    sleep(0.5)
-                    if element.is_displayed():
-                        element.click()
-                        self.logger.success(f"Clicked submit button using XPath: {xpath[:50]}...")
-                        return True
-                    # Try JavaScript click
-                    self.driver.execute_script("arguments[0].click();", element)
-                    self.logger.success(f"Clicked submit button (JS) using XPath: {xpath[:50]}...")
-                    return True
-                except Exception as e:
-                    self.logger.info(f"Failed to click with XPath {xpath[:50]}: {str(e)}")
-                    continue
-        
-        # Last resort: Try to find any button near the bottom of the form
-        self.logger.info("Trying to find submit button by position...")
-        try:
-            # Find all buttons on the page
-            buttons = self.driver.find_elements(By.TAG_NAME, "button")
-            inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit']")
-            all_submit_candidates = list(buttons) + list(inputs)
+        if not submit_clicked:
+            # Try finding by text content using XPath (case-insensitive)
+            xpath_selectors = [
+                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit')]",
+                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit application')]",
+                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'apply')]",
+                "//input[@type='submit']",
+                "//button[@type='submit']",
+                "//a[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit')]",
+                "//button[normalize-space(text())='Submit']",
+                "//button[normalize-space(text())='Submit application']",
+                "//button[normalize-space(text())='Apply']"
+            ]
             
-            # Filter buttons that might be submit buttons
-            for btn in all_submit_candidates:
-                try:
-                    text = btn.text.lower()
-                    btn_type = btn.get_attribute("type")
-                    btn_class = btn.get_attribute("class") or ""
-                    
-                    if (btn_type == "submit" or 
-                        "submit" in text or 
-                        "apply" in text or
-                        "submit" in btn_class.lower()):
-                        if btn.is_displayed():
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
-                            sleep(0.5)
-                            self.driver.execute_script("arguments[0].click();", btn)
-                            self.logger.success(f"Clicked submit button by text/type: {text[:30]}")
-                            return True
-                except:
-                    continue
-        except Exception as e:
-            self.logger.error(f"Error in last resort button search: {str(e)}")
+            for xpath in xpath_selectors:
+                element = self.helper.safe_find_element(By.XPATH, xpath, timeout=2)
+                if element:
+                    try:
+                        # Scroll element into view
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                        sleep(0.5)
+                        if element.is_displayed():
+                            element.click()
+                            self.logger.info(f"Clicked submit button using XPath: {xpath[:50]}...")
+                            submit_clicked = True
+                            break
+                        # Try JavaScript click
+                        self.driver.execute_script("arguments[0].click();", element)
+                        self.logger.info(f"Clicked submit button (JS) using XPath: {xpath[:50]}...")
+                        submit_clicked = True
+                        break
+                    except Exception as e:
+                        self.logger.info(f"Failed to click with XPath {xpath[:50]}: {str(e)}")
+                        continue
         
-        # Debug: Print page source snippet to help diagnose
-        self.logger.error("Could not find submit button. Attempting to debug...")
-        try:
-            # Take a screenshot for debugging
-            if take_screenshot:
-                take_screenshot(self.driver, "greenhouse_form_debug.png")
-                self.logger.info("Screenshot saved as greenhouse_form_debug.png")
-            
-            # Try to find any buttons and log their info
-            buttons = self.driver.find_elements(By.TAG_NAME, "button")
-            inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit'], input[type='button']")
-            all_buttons = list(buttons) + list(inputs)
-            
-            self.logger.info(f"Found {len(all_buttons)} buttons/inputs on page")
-            for i, btn in enumerate(all_buttons[:10]):  # Log first 10 buttons
-                try:
-                    text = btn.text or btn.get_attribute("value") or ""
-                    btn_type = btn.get_attribute("type") or ""
-                    btn_class = btn.get_attribute("class") or ""
-                    btn_id = btn.get_attribute("id") or ""
-                    is_displayed = btn.is_displayed()
-                    is_enabled = btn.is_enabled()
-                    self.logger.info(f"Button {i+1}: text='{text[:50]}', type='{btn_type}', id='{btn_id}', class='{btn_class[:50]}', displayed={is_displayed}, enabled={is_enabled}")
-                except Exception as e:
-                    self.logger.info(f"Button {i+1}: Error reading - {str(e)}")
-        except Exception as e:
-            self.logger.error(f"Error in debug logging: {str(e)}")
+        if not submit_clicked:
+            # Last resort: Try to find any button near the bottom of the form
+            self.logger.info("Trying to find submit button by position...")
+            try:
+                # Find all buttons on the page
+                buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit']")
+                all_submit_candidates = list(buttons) + list(inputs)
+                
+                # Filter buttons that might be submit buttons
+                for btn in all_submit_candidates:
+                    try:
+                        text = btn.text.lower()
+                        btn_type = btn.get_attribute("type")
+                        btn_class = btn.get_attribute("class") or ""
+                        
+                        if (btn_type == "submit" or 
+                            "submit" in text or 
+                            "apply" in text or
+                            "submit" in btn_class.lower()):
+                            if btn.is_displayed():
+                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                sleep(0.5)
+                                self.driver.execute_script("arguments[0].click();", btn)
+                                self.logger.info(f"Clicked submit button by text/type: {text[:30]}")
+                                submit_clicked = True
+                                break
+                    except:
+                        continue
+            except Exception as e:
+                self.logger.error(f"Error in last resort button search: {str(e)}")
         
-        return False
+        if not submit_clicked:
+            # Debug: Print page source snippet to help diagnose
+            self.logger.error("Could not find submit button. Attempting to debug...")
+            try:
+                # Take a screenshot for debugging
+                if take_screenshot:
+                    take_screenshot(self.driver, "greenhouse_form_debug.png")
+                    self.logger.info("Screenshot saved as greenhouse_form_debug.png")
+                
+                # Try to find any buttons and log their info
+                buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit'], input[type='button']")
+                all_buttons = list(buttons) + list(inputs)
+                
+                self.logger.info(f"Found {len(all_buttons)} buttons/inputs on page")
+                for i, btn in enumerate(all_buttons[:10]):  # Log first 10 buttons
+                    try:
+                        text = btn.text or btn.get_attribute("value") or ""
+                        btn_type = btn.get_attribute("type") or ""
+                        btn_class = btn.get_attribute("class") or ""
+                        btn_id = btn.get_attribute("id") or ""
+                        is_displayed = btn.is_displayed()
+                        is_enabled = btn.is_enabled()
+                        self.logger.info(f"Button {i+1}: text='{text[:50]}', type='{btn_type}', id='{btn_id}', class='{btn_class[:50]}', displayed={is_displayed}, enabled={is_enabled}")
+                    except Exception as e:
+                        self.logger.info(f"Button {i+1}: Error reading - {str(e)}")
+            except Exception as e:
+                self.logger.error(f"Error in debug logging: {str(e)}")
+            
+            return False
+        
+        # Verify that the form was actually submitted
+        return self._verify_submission(original_url)
     
     def _fill_education_section(self, education_entries):
         """Fill education section - can have multiple entries"""
@@ -928,28 +1144,43 @@ class GreenhouseAutomation:
                 silent=True
             )
         
-        # Disability status (with value normalization for common variations)
+        # Disability status (with smart pattern matching)
         if application_input.disability_status:
-            # Normalize common variations to match the actual dropdown options
-            disability_value = application_input.disability_status.strip()
-            disability_lower = disability_value.lower()
+            disability_input = application_input.disability_status.strip().lower()
             
-            # Map common variations to actual dropdown options
-            if "yes" in disability_lower or "have a disability" in disability_lower or "have one in the past" in disability_lower:
-                if "yes" in disability_lower or ("have" in disability_lower and "disability" in disability_lower):
-                    disability_value = "Yes, I have a disability, or have one in the past"
-            elif "no" in disability_lower and ("don't" in disability_lower or "do not" in disability_lower or "not have" in disability_lower):
-                disability_value = "No, I do not have a disability and have not one in the past"
-            elif "do not want" in disability_lower or "don't want" in disability_lower or "not want" in disability_lower or "decline" in disability_lower:
-                disability_value = "I do not want to answer"
+            # Determine which option to select based on input
+            # Options are:
+            # 1. "Yes, I have a disability, or have had one in the past"
+            # 2. "No, I do not have a disability and have not had one in the past"
+            # 3. "I do not want to answer"
             
-            self._fill_dropdown(
-                selectors=[GreenhouseSelectors.DISABILITY_STATUS],
-                value=disability_value,
-                field_name="Disability Status",
-                required=False,
-                silent=True
-            )
+            if "yes" in disability_input:
+                # Select first option that contains "yes" (Yes option)
+                self._fill_dropdown_by_pattern(
+                    selectors=[GreenhouseSelectors.DISABILITY_STATUS],
+                    pattern="yes",
+                    option_index=0,  # First matching option
+                    field_name="Disability Status",
+                    silent=True
+                )
+            elif "no" in disability_input:
+                # Select first option that contains "no" (No option)
+                self._fill_dropdown_by_pattern(
+                    selectors=[GreenhouseSelectors.DISABILITY_STATUS],
+                    pattern="no",
+                    option_index=0,  # First matching option
+                    field_name="Disability Status",
+                    silent=True
+                )
+            else:
+                # Select last option (I do not want to answer)
+                self._fill_dropdown_by_pattern(
+                    selectors=[GreenhouseSelectors.DISABILITY_STATUS],
+                    pattern="",
+                    option_index=-1,  # Last option
+                    field_name="Disability Status",
+                    silent=True
+                )
     
     def _fill_work_preferences(self, application_input):
         """Fill work preferences section"""
@@ -1016,6 +1247,151 @@ class GreenhouseAutomation:
         # If dropdown failed, try as text field
         return self._fill_field(selectors, value, field_name, required, silent)
     
+    def _fill_dropdown_by_pattern(self, selectors: list, pattern: str, option_index: int, field_name: str, required: bool = False, silent: bool = False) -> bool:
+        """
+        Fill dropdown by selecting option by index (0-based, -1 for last)
+        If pattern is provided, it will try to match options containing the pattern first
+        """
+        element = self.helper.find_element_by_multiple_selectors(selectors, silent=silent)
+        if not element:
+            if required:
+                self.logger.error(f"Required dropdown not found: {field_name}")
+            elif not silent:
+                self.logger.info(f"Optional dropdown not found (skipping): {field_name}")
+            return not required
+        
+        try:
+            # Check if it's a React Select component
+            is_react_select = False
+            try:
+                parent = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select__control')]")
+                if parent:
+                    is_react_select = True
+            except:
+                try:
+                    parent = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select-shell')]")
+                    if parent:
+                        is_react_select = True
+                except:
+                    pass
+            
+            if is_react_select:
+                try:
+                    # Find the parent select__control div
+                    try:
+                        control_div = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select__control')]")
+                    except:
+                        control_div = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select-shell')]//div[contains(@class, 'select__control')]")
+                    
+                    if control_div:
+                        # Scroll into view
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", control_div)
+                        sleep(0.3)
+                        
+                        # Click the control to open dropdown
+                        try:
+                            control_div.click()
+                        except:
+                            try:
+                                toggle_btn = control_div.find_element(By.CSS_SELECTOR, "button.icon-button, button[aria-label*='Toggle']")
+                                toggle_btn.click()
+                            except:
+                                pass
+                        sleep(0.8)  # Wait for menu to appear
+                        
+                        # Get all available options
+                        all_option_selectors = [
+                            "//div[contains(@class, 'select__menu')]//div[@role='option']",
+                            "//div[@role='listbox']//div[@role='option']",
+                            "//div[contains(@class, 'select__menu')]//div[contains(@class, 'option')]"
+                        ]
+                        
+                        all_options = []
+                        for selector in all_option_selectors:
+                            try:
+                                options = self.driver.find_elements(By.XPATH, selector)
+                                visible_options = [opt for opt in options if opt.is_displayed()]
+                                if visible_options:
+                                    all_options = visible_options
+                                    break
+                            except:
+                                continue
+                        
+                        if not all_options:
+                            self.logger.warning(f"No options found in {field_name} dropdown")
+                            return False
+                        
+                        selected_option = None
+                        option_text = ""
+                        
+                        # If pattern is provided, try to find matching options first
+                        if pattern:
+                            pattern_lower = pattern.lower()
+                            matching_options = []
+                            for opt in all_options:
+                                try:
+                                    opt_text = opt.text.strip().lower()
+                                    if pattern_lower in opt_text:
+                                        matching_options.append((opt, opt.text.strip()))
+                                except:
+                                    continue
+                            
+                            if matching_options:
+                                # Use the option at the specified index from matching options
+                                if option_index == -1:
+                                    selected_option, option_text = matching_options[-1]
+                                elif 0 <= option_index < len(matching_options):
+                                    selected_option, option_text = matching_options[option_index]
+                                else:
+                                    selected_option, option_text = matching_options[0]
+                            else:
+                                # No pattern match, use index from all options
+                                if option_index == -1:
+                                    selected_option = all_options[-1]
+                                    option_text = all_options[-1].text.strip()
+                                elif 0 <= option_index < len(all_options):
+                                    selected_option = all_options[option_index]
+                                    option_text = all_options[option_index].text.strip()
+                                else:
+                                    selected_option = all_options[0]
+                                    option_text = all_options[0].text.strip()
+                        else:
+                            # No pattern, use index directly
+                            if option_index == -1:
+                                selected_option = all_options[-1]
+                                option_text = all_options[-1].text.strip()
+                            elif 0 <= option_index < len(all_options):
+                                selected_option = all_options[option_index]
+                                option_text = all_options[option_index].text.strip()
+                            else:
+                                selected_option = all_options[0]
+                                option_text = all_options[0].text.strip()
+                        
+                        # Click the selected option
+                        if selected_option:
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", selected_option)
+                            sleep(0.2)
+                            try:
+                                selected_option.click()
+                            except:
+                                self.driver.execute_script("arguments[0].click();", selected_option)
+                            sleep(0.5)
+                            self.logger.info(f"Selected option '{option_text}' (index {option_index}) in {field_name}")
+                            return True
+                        
+                        return False
+                except Exception as e:
+                    if not silent:
+                        self.logger.error(f"Failed to select by pattern in {field_name}", e)
+                    return False
+            else:
+                # For native select, use standard dropdown filling
+                return self._fill_dropdown(selectors, pattern if pattern else "other", field_name, required, silent)
+        except Exception as e:
+            if not silent:
+                self.logger.error(f"Error in pattern-based dropdown selection for {field_name}", e)
+            return False
+    
     def _fill_dropdown_with_fallback(self, selectors: list, value: str, fallback_value: str, field_name: str, required: bool = False, silent: bool = False) -> bool:
         """Fill a dropdown with a fallback value if the primary value is not found"""
         # First try to fill with the primary value
@@ -1067,6 +1443,48 @@ class GreenhouseAutomation:
             elif not silent:
                 self.logger.info(f"Optional checkbox not found (skipping): {field_name}")
             return not required
+    
+    def _click_locate_me_button(self) -> bool:
+        """Click the 'Locate me' button as fallback for location city"""
+        try:
+            # Try multiple selectors for the "Locate me" button
+            locate_me_selectors = [
+                'button[class*="locate"]',
+                'button:contains("Locate me")',
+                'button:contains("Locate Me")',
+                'button[aria-label*="Locate"]',
+                'a[class*="locate"]',
+                'button.btn--tertiary',
+                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'locate me')]",
+                "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'locate')]",
+                "//a[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'locate me')]"
+            ]
+            
+            for selector in locate_me_selectors:
+                try:
+                    if selector.startswith("//"):
+                        element = self.helper.safe_find_element(By.XPATH, selector, timeout=2, silent=True)
+                    else:
+                        element = self.helper.safe_find_element_by_css(selector, timeout=2, silent=True)
+                    
+                    if element and element.is_displayed():
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                        sleep(0.3)
+                        try:
+                            element.click()
+                        except:
+                            self.driver.execute_script("arguments[0].click();", element)
+                        sleep(1)  # Wait for location to be detected
+                        self.logger.info("Clicked 'Locate me' button")
+                        return True
+                except:
+                    continue
+            
+            self.logger.warning("Could not find 'Locate me' button")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error clicking 'Locate me' button: {str(e)}")
+            return False
     
     def _click_add_another_school(self) -> bool:
         """Click 'Add another school' button"""
