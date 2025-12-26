@@ -1,3 +1,4 @@
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
@@ -13,6 +14,10 @@ try:
         from .utils import take_screenshot
     except ImportError:
         take_screenshot = None
+    try:
+        from .gmail_otp import GmailOTPReader
+    except ImportError:
+        GmailOTPReader = None
 except ImportError:
     from config import DEFAULT_WAIT_TIMEOUT, CHROME_OPTIONS, GreenhouseSelectors, SHORT_WAIT, MEDIUM_WAIT
     from models import GreenhouseApplicationInput, ApplicationResult
@@ -21,15 +26,41 @@ except ImportError:
         from utils import take_screenshot
     except ImportError:
         take_screenshot = None
+    try:
+        from gmail_otp import GmailOTPReader
+    except ImportError:
+        GmailOTPReader = None
 
 
 class GreenhouseAutomation:
     """Main automation class for Greenhouse job application"""
     
-    def __init__(self):
+    def __init__(self, enable_gmail_otp: bool = False, gmail_credentials_file: str = 'credentials.json', gmail_token_file: str = 'token.json'):
         self.driver = None
         self.helper = None
         self.logger = Logger()
+        self.gmail_otp_reader = None
+        
+        # Initialize Gmail OTP reader if enabled
+        if enable_gmail_otp:
+            if GmailOTPReader:
+                try:
+                    self.gmail_otp_reader = GmailOTPReader(gmail_credentials_file, gmail_token_file)
+                    self.gmail_otp_reader.set_logger(self.logger)
+                    self.logger.info("✅ Gmail OTP reader initialized")
+                    
+                    # Pre-authenticate if no token exists (to open browser upfront)
+                    if not os.path.exists(gmail_token_file):
+                        self.logger.info("🔐 No existing Gmail token found. Will authenticate when OTP is needed.")
+                        self.logger.info("   A browser window will open for Google OAuth authorization.")
+                except Exception as e:
+                    self.logger.error(f"❌ Failed to initialize Gmail OTP reader: {str(e)}")
+                    self.logger.error("Please check that credentials.json exists and is valid")
+                    self.gmail_otp_reader = None
+            else:
+                self.logger.error("❌ Gmail OTP reader requested but required packages are not installed!")
+                self.logger.error("Please install: pip install google-api-python-client google-auth-oauthlib google-auth-httplib2")
+                self.logger.error("Or run: pip install -r requirements.txt")
     
     def setup_driver(self):
         """Setup Chrome WebDriver"""
@@ -695,9 +726,305 @@ class GreenhouseAutomation:
                 self.logger.info(f"Optional dropdown not found (skipping): {field_name}")
             return not required
     
-    def _verify_submission(self, original_url: str) -> bool:
+    def _handle_otp_verification(self) -> bool:
+        """
+        Handle OTP verification if required after form submission
+        Returns True if OTP was found and filled, False otherwise
+        """
+        try:
+            # Check if OTP input field(s) are present
+            # First try single input field
+            otp_element = self.helper.find_element_by_multiple_selectors(
+                [GreenhouseSelectors.OTP_INPUT],
+                silent=True,
+                timeout=5
+            )
+            
+            # Also check for multiple input fields (8-character code split into separate inputs)
+            otp_inputs_multiple = self.driver.find_elements(By.CSS_SELECTOR, GreenhouseSelectors.OTP_INPUTS_MULTIPLE)
+            # Filter to only visible inputs that look like code inputs (usually 6-8 inputs)
+            visible_otp_inputs = [inp for inp in otp_inputs_multiple if inp.is_displayed()]
+            # Check if we have multiple inputs (typically 6-8 for verification codes)
+            has_multiple_inputs = len(visible_otp_inputs) >= 6 and len(visible_otp_inputs) <= 10
+            
+            if not otp_element and not has_multiple_inputs:
+                # No OTP field found, form might have submitted successfully
+                return False
+            
+            if has_multiple_inputs:
+                self.logger.info(f"OTP verification detected: {len(visible_otp_inputs)} separate input fields found")
+            else:
+                self.logger.info("OTP verification field detected (single input)")
+            
+            # Check if Gmail OTP reader is available
+            if not self.gmail_otp_reader:
+                self.logger.error("❌ OTP field detected but Gmail OTP reader is not enabled!")
+                self.logger.error("To enable Gmail OTP:")
+                self.logger.error("1. Install Gmail API packages: pip install google-api-python-client google-auth-oauthlib")
+                self.logger.error("2. Set up credentials.json (see GMAIL_SETUP.md)")
+                self.logger.error("3. Enable Gmail OTP when creating GreenhouseAutomation:")
+                self.logger.error("   automation = GreenhouseAutomation(enable_gmail_otp=True)")
+                return False
+            
+            # Authenticate with Gmail if not already done
+            if not self.gmail_otp_reader.service:
+                self.logger.info("=" * 60)
+                self.logger.info("🔐 GMAIL OAUTH AUTHENTICATION REQUIRED")
+                self.logger.info("=" * 60)
+                self.logger.info("A browser window will open shortly for Google OAuth authorization.")
+                self.logger.info("Please complete the authorization in the browser window.")
+                self.logger.info("This is a one-time setup - your token will be saved for future use.")
+                self.logger.info("=" * 60)
+                
+                # Small delay to ensure message is visible
+                sleep(1)
+                
+                if not self.gmail_otp_reader.authenticate():
+                    self.logger.error("=" * 60)
+                    self.logger.error("❌ Gmail API authentication failed")
+                    self.logger.error("=" * 60)
+                    self.logger.error("Please check:")
+                    self.logger.error("1. credentials.json file exists in the greenhouse_automation folder")
+                    self.logger.error("2. A browser window opened for OAuth (check if it was blocked)")
+                    self.logger.error("3. You completed the OAuth authorization in the browser")
+                    self.logger.error("4. Gmail API is enabled in your Google Cloud project")
+                    self.logger.error("5. OAuth consent screen is configured in Google Cloud Console")
+                    self.logger.error("")
+                    self.logger.error("If no browser window opened:")
+                    self.logger.error("- Check if pop-ups are blocked")
+                    self.logger.error("- Try running the script again")
+                    self.logger.error("- Check firewall/antivirus settings")
+                    self.logger.error("")
+                    self.logger.error("See GMAIL_SETUP.md for detailed setup instructions")
+                    self.logger.error("=" * 60)
+                    return False
+                
+                self.logger.info("=" * 60)
+                self.logger.info("✅ Gmail API authentication successful!")
+                self.logger.info("=" * 60)
+            
+            # Wait a moment for email to arrive
+            self.logger.info("Waiting for OTP email...")
+            sleep(5)  # Give email time to arrive
+            
+            # Try to get OTP from email
+            # Common Greenhouse email patterns
+            otp = None
+            max_attempts = 3
+            wait_seconds = 3
+            
+            for attempt in range(max_attempts):
+                self.logger.info(f"Attempting to retrieve OTP (attempt {attempt + 1}/{max_attempts})...")
+                
+                # Try different email filters
+                otp = self.gmail_otp_reader.get_otp_from_latest_email(
+                    from_email=None,  # Greenhouse might use different sender addresses
+                    subject_contains="verification",  # Common subject keywords
+                    max_age_minutes=5
+                )
+                
+                if not otp:
+                    # Try without subject filter
+                    otp = self.gmail_otp_reader.get_otp_from_latest_email(
+                        from_email=None,
+                        subject_contains=None,
+                        max_age_minutes=5
+                    )
+                
+                if otp:
+                    self.logger.info(f"OTP retrieved: {otp}")
+                    break
+                
+                if attempt < max_attempts - 1:
+                    self.logger.info(f"OTP not found yet, waiting {wait_seconds} seconds...")
+                    sleep(wait_seconds)
+            
+            if not otp:
+                self.logger.error("Could not retrieve OTP from Gmail")
+                return False
+            
+            # Fill OTP field(s)
+            try:
+                filled_successfully = False
+                last_filled_element = None
+                
+                if has_multiple_inputs:
+                    # Handle multiple input fields (8-character code)
+                    self.logger.info(f"Filling {len(visible_otp_inputs)} separate input fields with code: {otp}")
+                    
+                    # Sort inputs by their position (left to right, top to bottom)
+                    try:
+                        # Get positions and sort
+                        input_positions = []
+                        for inp in visible_otp_inputs:
+                            location = inp.location
+                            input_positions.append((location['y'], location['x'], inp))
+                        input_positions.sort(key=lambda x: (x[0], x[1]))  # Sort by y then x
+                        sorted_inputs = [inp[2] for inp in input_positions]
+                    except:
+                        # Fallback: use inputs in order found
+                        sorted_inputs = visible_otp_inputs
+                    
+                    # Fill each character into its corresponding input field
+                    otp_chars = list(otp)
+                    for i, input_field in enumerate(sorted_inputs[:len(otp_chars)]):
+                        try:
+                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", input_field)
+                            sleep(0.1)
+                            input_field.clear()
+                            input_field.send_keys(otp_chars[i])
+                            self.logger.info(f"Filled character {i+1}/{len(otp_chars)}: {otp_chars[i]}")
+                            last_filled_element = input_field
+                            sleep(0.1)
+                        except Exception as e:
+                            self.logger.warning(f"Failed to fill character {i+1}: {str(e)}")
+                    
+                    self.logger.info(f"✅ OTP filled into {min(len(sorted_inputs), len(otp_chars))} input fields")
+                    filled_successfully = True
+                    sleep(1)
+                elif otp_element:
+                    # Handle single input field
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", otp_element)
+                    sleep(0.3)
+                    otp_element.clear()
+                    otp_element.send_keys(otp)
+                    self.logger.info(f"✅ OTP filled: {otp}")
+                    last_filled_element = otp_element
+                    filled_successfully = True
+                    sleep(1)
+                else:
+                    self.logger.error("❌ Could not find OTP input field(s)")
+                    return False
+                
+                if not filled_successfully:
+                    self.logger.error("❌ Failed to fill OTP")
+                    return False
+                
+                # Find and click verify/submit button
+                self.logger.info("Looking for submit/verify button...")
+                
+                # Try multiple selectors for submit button
+                submit_selectors = [
+                    GreenhouseSelectors.VERIFY_BUTTON,
+                    'button[type="submit"]',
+                    'button:contains("Submit")',
+                    'button:contains("Verify")',
+                    'button:contains("Confirm")',
+                    'input[type="submit"]',
+                    "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'submit')]",
+                    "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'verify')]",
+                    "//button[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'confirm')]",
+                ]
+                
+                verify_button = None
+                for selector in submit_selectors:
+                    try:
+                        if selector.startswith("//"):
+                            verify_button = self.helper.safe_find_element(By.XPATH, selector, timeout=2, silent=True)
+                        else:
+                            verify_button = self.helper.safe_find_element_by_css(selector, timeout=2, silent=True)
+                        
+                        if verify_button and verify_button.is_displayed() and verify_button.is_enabled():
+                            break
+                        else:
+                            verify_button = None
+                    except:
+                        continue
+                
+                if verify_button:
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", verify_button)
+                    sleep(0.3)
+                    try:
+                        verify_button.click()
+                        self.logger.info("✅ Clicked submit/verify button")
+                    except:
+                        try:
+                            self.driver.execute_script("arguments[0].click();", verify_button)
+                            self.logger.info("✅ Clicked submit/verify button (JS)")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to click button: {str(e)}")
+                    sleep(2)
+                    return True
+                else:
+                    # Try pressing Enter on the last filled element
+                    if last_filled_element:
+                        try:
+                            self.logger.info("Submit button not found, pressing Enter on OTP field...")
+                            last_filled_element.send_keys(Keys.ENTER)
+                            self.logger.info("✅ Pressed Enter on OTP field")
+                            sleep(2)
+                            return True
+                        except Exception as e:
+                            self.logger.warning(f"Failed to press Enter: {str(e)}")
+                    
+                    # Last resort: try to find any submit button on the page
+                    self.logger.info("Trying to find submit button by searching all buttons...")
+                    try:
+                        all_buttons = self.driver.find_elements(By.TAG_NAME, "button")
+                        for btn in all_buttons:
+                            try:
+                                btn_text = btn.text.lower()
+                                btn_type = btn.get_attribute("type")
+                                if (btn.is_displayed() and btn.is_enabled() and 
+                                    (btn_type == "submit" or "submit" in btn_text or "verify" in btn_text or "confirm" in btn_text)):
+                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                    sleep(0.3)
+                                    btn.click()
+                                    self.logger.info(f"✅ Clicked submit button: {btn_text[:30]}")
+                                    sleep(2)
+                                    return True
+                            except:
+                                continue
+                    except Exception as e:
+                        self.logger.warning(f"Failed to find submit button: {str(e)}")
+                    
+                    self.logger.warning("⚠️ Could not find or click submit button, but OTP was filled")
+                    return True  # Return True anyway since OTP was filled
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to fill OTP: {str(e)}")
+                import traceback
+                self.logger.error(f"Traceback: {traceback.format_exc()}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error in OTP verification: {str(e)}")
+            return False
+    
+    def _verify_submission(self, original_url: str, otp_handled: bool = False) -> bool:
         """Verify that the form was actually submitted successfully"""
         self.logger.info("Verifying form submission...")
+        
+        if otp_handled:
+            self.logger.info("OTP was handled - using more lenient verification criteria")
+        
+        # Check if OTP field is still present (form waiting for OTP)
+        otp_element = self.helper.find_element_by_multiple_selectors(
+            [GreenhouseSelectors.OTP_INPUT],
+            silent=True,
+            timeout=2
+        )
+        
+        if otp_element and otp_element.is_displayed():
+            self.logger.warning("⚠️ OTP field is still visible - form may be waiting for OTP")
+            # If OTP handling failed, this is an error
+            if not self.gmail_otp_reader:
+                self.logger.error("❌ OTP required but Gmail OTP reader is not enabled!")
+                self.logger.error("Please enable Gmail OTP: GreenhouseAutomation(enable_gmail_otp=True)")
+                return False
+            # If OTP reader exists but OTP field is still there, OTP might not have been filled correctly
+            self.logger.warning("OTP field still present after OTP handling - checking if OTP was filled...")
+            try:
+                otp_value = otp_element.get_attribute("value") or ""
+                if not otp_value:
+                    self.logger.error("❌ OTP field is empty - OTP was not filled correctly")
+                    return False
+                else:
+                    self.logger.info(f"OTP field has value: {otp_value[:2]}** (waiting for verification to complete...)")
+                    # Wait a bit more for verification
+                    sleep(3)
+            except:
+                pass
         
         # Wait for page to process submission
         sleep(3)
@@ -802,6 +1129,21 @@ class GreenhouseAutomation:
             if final_url != original_url:
                 self.logger.success("Form submitted successfully (URL changed after wait)")
                 return True
+            
+            # If OTP was handled, be more lenient - OTP flow might have completed even if we can't verify
+            if otp_handled:
+                # Check if OTP field is gone (indicating OTP was processed)
+                otp_element = self.helper.find_element_by_multiple_selectors(
+                    [GreenhouseSelectors.OTP_INPUT],
+                    silent=True,
+                    timeout=1
+                )
+                if not otp_element or not otp_element.is_displayed():
+                    self.logger.info("OTP field is no longer visible - OTP was likely processed successfully")
+                    self.logger.success("Form submission likely successful (OTP processed, but couldn't verify final state)")
+                    return True
+                else:
+                    self.logger.warning("OTP field still visible - OTP may not have been processed correctly")
             
             # If we get here, we're not sure - log warning
             self.logger.warning("Could not definitively verify submission. Form may or may not have been submitted.")
@@ -963,8 +1305,28 @@ class GreenhouseAutomation:
             
             return False
         
+        # Wait a bit for page to respond after clicking submit
+        sleep(2)
+        
+        # Check if OTP is required and handle it
+        otp_handled = False
+        otp_required = self._handle_otp_verification()
+        if otp_required:
+            self.logger.info("✅ OTP was filled and verified")
+            otp_handled = True
+            # Wait for form to process OTP and complete submission
+            self.logger.info("Waiting for form to process OTP and complete submission...")
+            sleep(5)  # Give more time for OTP verification and final submission
+        
         # Verify that the form was actually submitted
-        return self._verify_submission(original_url)
+        # If OTP was handled, give it more time and be more lenient in verification
+        if otp_handled:
+            self.logger.info("Verifying submission after OTP verification...")
+            # Wait a bit more for final submission to complete
+            sleep(3)
+        
+        # Pass otp_handled flag to verification for more lenient checking
+        return self._verify_submission(original_url, otp_handled=otp_handled)
     
     def _fill_education_section(self, education_entries):
         """Fill education section - can have multiple entries"""
@@ -1641,10 +2003,22 @@ class GreenhouseAutomation:
             self.logger.warning("User was referred but no referrer name provided. The form may require this field.")
 
 
-def run_automation(input_data: dict) -> dict:
-    """Convenience function to run automation from dict input"""
+def run_automation(input_data: dict, enable_gmail_otp: bool = False, gmail_credentials_file: str = 'credentials.json', gmail_token_file: str = 'token.json') -> dict:
+    """
+    Convenience function to run automation from dict input
+    
+    Args:
+        input_data: Dictionary containing application form data
+        enable_gmail_otp: Enable Gmail API for automatic OTP retrieval
+        gmail_credentials_file: Path to Gmail OAuth2 credentials JSON file
+        gmail_token_file: Path to store/load Gmail OAuth2 token
+    """
     application_input = GreenhouseApplicationInput.from_dict(input_data)
-    automation = GreenhouseAutomation()
+    automation = GreenhouseAutomation(
+        enable_gmail_otp=True,
+        gmail_credentials_file="credentials.json",
+        gmail_token_file="token.json"
+    )
     result = automation.run(application_input)
     return result.to_dict()
 

@@ -92,6 +92,13 @@ class GreenhouseSelectors:
     SAVE_CHANGES = 'button:contains("Save Changes"), button:contains("Save"), a:contains("Save Changes")'
     CANCEL_CHANGES = 'button:contains("Cancel"), a:contains("Cancel")'
     
+    # OTP/Verification code fields
+    # Single input field (if all in one)
+    OTP_INPUT = 'input[id*="otp"], input[id*="verification"], input[id*="code"], input[name*="otp"], input[name*="verification"], input[name*="code"], input[type="text"][placeholder*="code"], input[type="text"][placeholder*="OTP"], input[type="text"][placeholder*="verification"], input[type="text"][placeholder*="Security code"]'
+    # Multiple input fields (8-character code split into separate inputs)
+    OTP_INPUTS_MULTIPLE = 'input[type="text"][maxlength="1"], input[type="text"][maxlength="2"], input[aria-label*="code"], input[aria-label*="verification"], input[aria-label*="character"], div[class*="code"] input, div[class*="verification"] input, div[class*="security"] input'
+    VERIFY_BUTTON = 'button[type="submit"]:contains("Verify"), button:contains("Verify"), button:contains("Submit"), button[id*="verify"], button:contains("Confirm")'
+    
     # Alternative selectors using data attributes (common in Greenhouse)
     FIRST_NAME_ALT = 'input[data-field="first_name"]'
     LAST_NAME_ALT = 'input[data-field="last_name"]'

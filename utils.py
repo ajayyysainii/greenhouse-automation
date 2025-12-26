@@ -18,6 +18,11 @@ class Logger:
         print(f"[INFO] {message}")
     
     @staticmethod
+    def warning(message: str):
+        """Log warning message"""
+        print(f"[WARNING] {message}")
+    
+    @staticmethod
     def error(message: str, error: Optional[Exception] = None):
         """Log error message"""
         print(f"[ERROR] {message}")
