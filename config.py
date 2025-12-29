@@ -35,10 +35,10 @@ class GreenhouseSelectors:
     LOCATE_ME_BUTTON = 'button[class*="locate"], button:contains("Locate me"), button:contains("Locate Me"), button[aria-label*="Locate"], a[class*="locate"], button.btn--tertiary'
     
     # Online profiles
-    LINKEDIN = 'input[id="question_29030630003"], input[id*="linkedin"], input[name*="linkedin"], input[placeholder*="LinkedIn"]'
-    GITHUB = 'input[id*="github"], input[name*="github"], input[placeholder*="GitHub"], input[placeholder*="Github"]'
-    PORTFOLIO = 'input[id*="portfolio"], input[name*="portfolio"], input[placeholder*="Portfolio"]'
-    WEBSITE = 'input[id="question_29030631003"], input[id*="website"], input[name*="website"], input[placeholder*="Website"]'
+    LINKEDIN = 'input[id*="linkedin"], input[id*="LinkedIn"], input[name*="linkedin"], input[name*="LinkedIn"], input[placeholder*="LinkedIn"], input[placeholder*="linkedin"], textarea[id*="linkedin"], textarea[name*="linkedin"]'
+    GITHUB = 'input[id*="github"], input[id*="GitHub"], input[name*="github"], input[name*="GitHub"], input[placeholder*="GitHub"], input[placeholder*="Github"], textarea[id*="github"]'
+    PORTFOLIO = 'input[id*="portfolio"], input[id*="Portfolio"], input[name*="portfolio"], input[placeholder*="Portfolio"], textarea[id*="portfolio"]'
+    WEBSITE = 'input[id*="website"], input[id*="Website"], input[id*="web"], input[name*="website"], input[name*="Website"], input[placeholder*="Website"], input[placeholder*="website"], input[placeholder*="site"], textarea[id*="website"], textarea[name*="website"]'
     
     # File upload fields
     RESUME_UPLOAD = 'input[type="file"][id="resume"], input[type="file"][id*="resume"], input[type="file"][name*="resume"]'

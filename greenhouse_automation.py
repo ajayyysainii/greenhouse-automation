@@ -18,6 +18,10 @@ try:
         from .gmail_otp import GmailOTPReader
     except ImportError:
         GmailOTPReader = None
+    try:
+        from .gpt_field_filler import GPTFieldFiller
+    except ImportError:
+        GPTFieldFiller = None
 except ImportError:
     from config import DEFAULT_WAIT_TIMEOUT, CHROME_OPTIONS, GreenhouseSelectors, SHORT_WAIT, MEDIUM_WAIT
     from models import GreenhouseApplicationInput, ApplicationResult
@@ -30,16 +34,36 @@ except ImportError:
         from gmail_otp import GmailOTPReader
     except ImportError:
         GmailOTPReader = None
+    try:
+        from gpt_field_filler import GPTFieldFiller
+    except ImportError:
+        GPTFieldFiller = None
 
 
 class GreenhouseAutomation:
     """Main automation class for Greenhouse job application"""
     
-    def __init__(self, enable_gmail_otp: bool = False, gmail_credentials_file: str = 'credentials.json', gmail_token_file: str = 'token.json'):
+    def __init__(self, enable_gmail_otp: bool = False, gmail_credentials_file: str = 'credentials.json', gmail_token_file: str = 'token.json', enable_gpt: bool = True, gpt_model: str = 'gpt-4', openai_api_key: str = None):
         self.driver = None
         self.helper = None
         self.logger = Logger()
         self.gmail_otp_reader = None
+        self.gpt_filler = None
+        self.enable_gpt = enable_gpt
+        self.application_context = {}
+        
+        # Initialize GPT field filler if enabled
+        if enable_gpt and GPTFieldFiller:
+            try:
+                self.gpt_filler = GPTFieldFiller(api_key=openai_api_key, model=gpt_model)
+                self.logger.info(f"✅ GPT field filler initialized (model: {gpt_model})")
+            except Exception as e:
+                self.logger.warning(f"⚠️  Could not initialize GPT filler: {str(e)}")
+                self.logger.warning("Continuing without GPT support")
+                self.enable_gpt = False
+        elif enable_gpt and not GPTFieldFiller:
+            self.logger.warning("⚠️  GPT field filler not available (openai package not installed)")
+            self.enable_gpt = False
         
         # Initialize Gmail OTP reader if enabled
         if enable_gmail_otp:
@@ -140,6 +164,10 @@ class GreenhouseAutomation:
     def _fill_application_form(self, application_input: GreenhouseApplicationInput) -> ApplicationResult:
         """Fill the Greenhouse application form"""
         self.logger.info("Filling application form...")
+        
+        # Store application context for GPT
+        if self.enable_gpt:
+            self.application_context = application_input.to_dict() if hasattr(application_input, 'to_dict') else {}
         
         try:
             # Wait for form to load
@@ -301,6 +329,14 @@ class GreenhouseAutomation:
                 self.logger.info("Filling Work Preferences...")
                 self._fill_work_preferences(application_input)
             
+            # IMPORTANT: Fill any remaining empty fields with GPT before submitting
+            if self.enable_gpt and self.gpt_filler:
+                self.logger.info("🔍 Scanning for unfilled fields to complete with GPT...")
+                sleep(1)  # Wait for any dynamic fields
+                filled_count = self._fill_unknown_fields_with_gpt()
+                if filled_count > 0:
+                    self.logger.success(f"✨ GPT filled {filled_count} additional field(s)")
+            
             # Submit the form
             self.logger.info("Submitting application...")
             sleep(MEDIUM_WAIT)  # Wait a bit longer for form to be ready
@@ -345,6 +381,16 @@ class GreenhouseAutomation:
     
     def _fill_field(self, selectors: list, value: str, field_name: str, required: bool = True, silent: bool = False) -> bool:
         """Fill a form field using multiple selector strategies"""
+        # If value is missing/empty and GPT is enabled, try to generate it
+        if (not value or not str(value).strip()) and self.enable_gpt and self.gpt_filler:
+            try:
+                self.logger.info(f"🤖 Value not provided for '{field_name}', using GPT to generate...")
+                value = self.gpt_filler.get_answer(field_name, self.application_context)
+                if value:
+                    self.logger.success(f"✅ GPT generated: {value[:60]}...")
+            except Exception as e:
+                self.logger.warning(f"⚠️  GPT generation failed for '{field_name}': {str(e)}")
+        
         element = self.helper.find_element_by_multiple_selectors(selectors, silent=silent)
         if element:
             try:
@@ -725,6 +771,374 @@ class GreenhouseAutomation:
             elif not silent:
                 self.logger.info(f"Optional dropdown not found (skipping): {field_name}")
             return not required
+    
+    def _get_field_label(self, element) -> str:
+        """Extract the label/question text for a form field"""
+        try:
+            # Try to find associated label by ID
+            field_id = element.get_attribute("id")
+            if field_id:
+                labels = self.driver.find_elements(By.CSS_SELECTOR, f'label[for="{field_id}"]')
+                if labels and labels[0].text.strip():
+                    return labels[0].text.strip()
+            
+            # Try parent label
+            try:
+                parent = element.find_element(By.XPATH, "./ancestor::label[1]")
+                if parent and parent.text.strip():
+                    return parent.text.strip()
+            except:
+                pass
+            
+            # Try preceding label (sibling)
+            try:
+                label = element.find_element(By.XPATH, "./preceding-sibling::label[1]")
+                if label and label.text.strip():
+                    return label.text.strip()
+            except:
+                pass
+            
+            # Try label in parent's previous sibling
+            try:
+                parent_div = element.find_element(By.XPATH, "./parent::div")
+                prev_label = parent_div.find_element(By.XPATH, "./preceding-sibling::label[1]")
+                if prev_label and prev_label.text.strip():
+                    return prev_label.text.strip()
+            except:
+                pass
+            
+            # Try finding label in parent container
+            try:
+                parent_container = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'field') or contains(@class, 'form-group') or contains(@class, 'question')][1]")
+                labels_in_container = parent_container.find_elements(By.TAG_NAME, "label")
+                if labels_in_container and labels_in_container[0].text.strip():
+                    return labels_in_container[0].text.strip()
+            except:
+                pass
+            
+            # Try finding any text in parent div that looks like a question
+            try:
+                parent_div = element.find_element(By.XPATH, "./parent::div")
+                # Get all text from parent
+                parent_text = parent_div.text.strip()
+                if parent_text and len(parent_text) < 200:  # Reasonable length for a question
+                    # Remove the current input value from text
+                    current_value = element.get_attribute("value") or ""
+                    if current_value:
+                        parent_text = parent_text.replace(current_value, "").strip()
+                    if parent_text:
+                        return parent_text
+            except:
+                pass
+            
+            # Try aria-label
+            aria_label = element.get_attribute("aria-label")
+            if aria_label and aria_label.strip():
+                return aria_label.strip()
+            
+            # Try aria-labelledby
+            aria_labelledby = element.get_attribute("aria-labelledby")
+            if aria_labelledby:
+                try:
+                    label_element = self.driver.find_element(By.ID, aria_labelledby)
+                    if label_element and label_element.text.strip():
+                        return label_element.text.strip()
+                except:
+                    pass
+            
+            # Try placeholder
+            placeholder = element.get_attribute("placeholder")
+            if placeholder and placeholder.strip():
+                return placeholder.strip()
+            
+            # Try name attribute as last resort
+            name = element.get_attribute("name")
+            if name:
+                # Convert name to readable text
+                readable = name.replace("_", " ").replace("-", " ").title()
+                return readable
+            
+            return None
+            
+        except Exception as e:
+            return None
+    
+    def _fill_unknown_fields_with_gpt(self) -> int:
+        """Scan form for empty text fields and textareas, fill them with GPT"""
+        if not self.enable_gpt or not self.gpt_filler:
+            return 0
+        
+        filled_count = 0
+        
+        try:
+            # Scroll through the page to ensure all fields are loaded
+            self.logger.info("📄 Scrolling through form to load all fields...")
+            self.driver.execute_script("window.scrollTo(0, 0);")
+            sleep(0.5)
+            
+            # Scroll to bottom to trigger any lazy-loaded fields
+            total_height = self.driver.execute_script("return document.body.scrollHeight")
+            viewport_height = self.driver.execute_script("return window.innerHeight")
+            current_position = 0
+            
+            while current_position < total_height:
+                self.driver.execute_script(f"window.scrollTo(0, {current_position});")
+                sleep(0.3)
+                current_position += viewport_height
+            
+            # Scroll back to top
+            self.driver.execute_script("window.scrollTo(0, 0);")
+            sleep(0.5)
+            
+            # First, handle ALL types of text inputs and textareas
+            self.logger.info("🔍 Scanning for ALL empty input fields...")
+            text_fields = self.driver.find_elements(
+                By.CSS_SELECTOR,
+                'input[type="text"], input[type="url"], input[type="number"], input[type="tel"], input:not([type]), textarea'
+            )
+            
+            self.logger.info(f"   Found {len(text_fields)} input fields to check")
+            
+            for field in text_fields:
+                try:
+                    # Skip if not displayed
+                    if not field.is_displayed():
+                        continue
+                    
+                    # Skip if already filled
+                    current_value = field.get_attribute("value")
+                    if field.tag_name.lower() == "textarea":
+                        current_value = field.text or current_value
+                    
+                    if current_value and current_value.strip():
+                        continue
+                    
+                    # Skip if disabled or readonly
+                    if field.get_attribute("disabled") or field.get_attribute("readonly"):
+                        continue
+                    
+                    # Skip file inputs and search inputs
+                    field_type = field.get_attribute("type")
+                    if field_type in ["file", "hidden", "submit", "button", "search", "checkbox", "radio"]:
+                        continue
+                    
+                    # Skip React Select input fields (they're handled separately)
+                    field_class = field.get_attribute("class") or ""
+                    if "select__input" in field_class or "react-select" in field_class:
+                        continue
+                    
+                    # Get the field label/question
+                    label = self._get_field_label(field)
+                    if not label:
+                        # Try harder to get a label
+                        field_id = field.get_attribute("id")
+                        field_name = field.get_attribute("name")
+                        if field_name:
+                            label = field_name.replace("_", " ").replace("-", " ").title()
+                        elif field_id:
+                            label = field_id.replace("_", " ").replace("-", " ").title()
+                        else:
+                            continue
+                    
+                    # Skip common fields we already filled
+                    label_lower = label.lower()
+                    skip_keywords = ['email', 'first name', 'last name', 'phone', 'resume', 'cv', 'password', 'confirm password']
+                    if any(keyword in label_lower for keyword in skip_keywords):
+                        continue
+                    
+                    # Check if this field matches known data from input.json
+                    # If we have LinkedIn/Website in JSON but field wasn't found earlier, use it now
+                    answer = None
+                    
+                    if ('linkedin' in label_lower or 'linked in' in label_lower) and self.application_context.get('linkedin_profile'):
+                        answer = self.application_context['linkedin_profile']
+                        self.logger.info(f"📋 Using LinkedIn from input.json for: {label}")
+                    elif ('website' in label_lower or 'personal site' in label_lower or 'portfolio' in label_lower) and self.application_context.get('website'):
+                        answer = self.application_context['website']
+                        self.logger.info(f"📋 Using Website from input.json for: {label}")
+                    elif ('github' in label_lower or 'git hub' in label_lower) and self.application_context.get('github_profile'):
+                        answer = self.application_context['github_profile']
+                        self.logger.info(f"📋 Using GitHub from input.json for: {label}")
+                    elif 'portfolio' in label_lower and self.application_context.get('portfolio'):
+                        answer = self.application_context['portfolio']
+                        self.logger.info(f"📋 Using Portfolio from input.json for: {label}")
+                    
+                    # If no direct match, generate answer with GPT
+                    if not answer:
+                        self.logger.info(f"🤖 Generating answer for: {label}")
+                        answer = self.gpt_filler.get_answer(label, self.application_context)
+                    
+                    if answer and answer.strip():
+                        # Fill the field
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", field)
+                        sleep(0.3)
+                        field.clear()
+                        field.send_keys(answer)
+                        self.logger.success(f"✅ Filled '{label}': {answer[:60]}{'...' if len(answer) > 60 else ''}")
+                        filled_count += 1
+                        sleep(0.5)
+                    
+                except Exception as e:
+                    # Silently skip fields that cause errors
+                    continue
+            
+            # Now handle dropdown/select fields
+            self.logger.info("🔍 Scanning for empty dropdown fields...")
+            select_fields = self.driver.find_elements(By.CSS_SELECTOR, 'select')
+            
+            for select_field in select_fields:
+                try:
+                    if not select_field.is_displayed():
+                        continue
+                    
+                    # Skip if disabled
+                    if select_field.get_attribute("disabled"):
+                        continue
+                    
+                    # Check if already selected (not default/empty)
+                    from selenium.webdriver.support.ui import Select
+                    select = Select(select_field)
+                    selected_option = select.first_selected_option
+                    selected_text = selected_option.text.strip()
+                    
+                    # Skip if already has a non-empty selection
+                    if selected_text and selected_text.lower() not in ['select', 'choose', 'please select', '-', '--', '---', '']:
+                        continue
+                    
+                    # Get the field label
+                    label = self._get_field_label(select_field)
+                    if not label:
+                        continue
+                    
+                    # Get all available options
+                    options = select.options
+                    option_texts = [opt.text.strip() for opt in options if opt.text.strip() and opt.text.strip().lower() not in ['select', 'choose', 'please select', '-', '--', '---', '']]
+                    
+                    if not option_texts:
+                        continue
+                    
+                    # Ask GPT to choose from available options
+                    question = f"{label}\n\nAvailable options: {', '.join(option_texts)}\n\nChoose the most appropriate option from the list above."
+                    self.logger.info(f"🤖 Asking GPT to select from dropdown: {label}")
+                    
+                    answer = self.gpt_filler.get_answer(question, self.application_context)
+                    
+                    if answer and answer.strip():
+                        # Try to select the GPT's choice
+                        success = False
+                        answer_clean = answer.strip()
+                        
+                        # Try exact match first
+                        for option in options:
+                            if option.text.strip() == answer_clean:
+                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", select_field)
+                                sleep(0.3)
+                                select.select_by_visible_text(option.text.strip())
+                                self.logger.success(f"✅ Selected '{option.text.strip()}' in '{label}'")
+                                filled_count += 1
+                                success = True
+                                sleep(0.5)
+                                break
+                        
+                        # Try partial match if exact didn't work
+                        if not success:
+                            for option in options:
+                                if answer_clean.lower() in option.text.strip().lower() or option.text.strip().lower() in answer_clean.lower():
+                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", select_field)
+                                    sleep(0.3)
+                                    select.select_by_visible_text(option.text.strip())
+                                    self.logger.success(f"✅ Selected '{option.text.strip()}' in '{label}' (partial match)")
+                                    filled_count += 1
+                                    success = True
+                                    sleep(0.5)
+                                    break
+                        
+                        if not success:
+                            self.logger.warning(f"⚠️ Could not match GPT answer '{answer_clean}' to dropdown options for '{label}'")
+                    
+                except Exception as e:
+                    continue
+            
+            # Handle React Select dropdowns
+            self.logger.info("🔍 Scanning for React Select dropdowns...")
+            react_selects = self.driver.find_elements(By.CSS_SELECTOR, 'div.select__control, div[class*="react-select"]')
+            
+            for react_select in react_selects:
+                try:
+                    if not react_select.is_displayed():
+                        continue
+                    
+                    # Check if already has a value
+                    value_div = react_select.find_elements(By.CSS_SELECTOR, '.select__single-value, .react-select__single-value')
+                    if value_div and value_div[0].text.strip():
+                        continue
+                    
+                    # Get label
+                    label = self._get_field_label(react_select)
+                    if not label:
+                        # Try to find label by looking at parent structure
+                        try:
+                            parent = react_select.find_element(By.XPATH, "./ancestor::div[contains(@class, 'field')]")
+                            label_elem = parent.find_element(By.CSS_SELECTOR, "label")
+                            label = label_elem.text.strip()
+                        except:
+                            continue
+                    
+                    if not label:
+                        continue
+                    
+                    # Click to open dropdown
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", react_select)
+                    sleep(0.3)
+                    react_select.click()
+                    sleep(0.5)
+                    
+                    # Get available options
+                    option_elements = self.driver.find_elements(By.CSS_SELECTOR, '.select__option, .react-select__option')
+                    option_texts = [opt.text.strip() for opt in option_elements if opt.text.strip()]
+                    
+                    if option_texts:
+                        # Ask GPT to choose
+                        question = f"{label}\n\nAvailable options: {', '.join(option_texts)}\n\nChoose the most appropriate option from the list above."
+                        self.logger.info(f"🤖 Asking GPT to select from React dropdown: {label}")
+                        
+                        answer = self.gpt_filler.get_answer(question, self.application_context)
+                        
+                        if answer and answer.strip():
+                            answer_clean = answer.strip()
+                            success = False
+                            
+                            # Try to click the matching option
+                            for opt in option_elements:
+                                if opt.text.strip() == answer_clean or answer_clean.lower() in opt.text.strip().lower():
+                                    opt.click()
+                                    self.logger.success(f"✅ Selected '{opt.text.strip()}' in '{label}'")
+                                    filled_count += 1
+                                    success = True
+                                    sleep(0.5)
+                                    break
+                            
+                            if not success:
+                                # Close dropdown if we didn't select anything
+                                react_select.click()
+                                self.logger.warning(f"⚠️ Could not match GPT answer '{answer_clean}' to options for '{label}'")
+                    else:
+                        # Close dropdown
+                        react_select.click()
+                    
+                except Exception as e:
+                    # Try to close dropdown if error
+                    try:
+                        self.driver.find_element(By.TAG_NAME, 'body').click()
+                    except:
+                        pass
+                    continue
+            
+            return filled_count
+            
+        except Exception as e:
+            self.logger.error(f"Error scanning for unknown fields: {str(e)}")
+            return filled_count
     
     def _handle_otp_verification(self) -> bool:
         """
@@ -2003,7 +2417,7 @@ class GreenhouseAutomation:
             self.logger.warning("User was referred but no referrer name provided. The form may require this field.")
 
 
-def run_automation(input_data: dict, enable_gmail_otp: bool = False, gmail_credentials_file: str = 'credentials.json', gmail_token_file: str = 'token.json') -> dict:
+def run_automation(input_data: dict, enable_gmail_otp: bool = False, gmail_credentials_file: str = 'credentials.json', gmail_token_file: str = 'token.json', enable_gpt: bool = True, gpt_model: str = 'gpt-4', openai_api_key: str = None) -> dict:
     """
     Convenience function to run automation from dict input
     
@@ -2012,12 +2426,18 @@ def run_automation(input_data: dict, enable_gmail_otp: bool = False, gmail_crede
         enable_gmail_otp: Enable Gmail API for automatic OTP retrieval
         gmail_credentials_file: Path to Gmail OAuth2 credentials JSON file
         gmail_token_file: Path to store/load Gmail OAuth2 token
+        enable_gpt: Enable GPT for filling missing fields (default: True)
+        gpt_model: GPT model to use (default: 'gpt-4')
+        openai_api_key: OpenAI API key (optional, uses env var if not provided)
     """
     application_input = GreenhouseApplicationInput.from_dict(input_data)
     automation = GreenhouseAutomation(
-        enable_gmail_otp=True,
-        gmail_credentials_file="credentials.json",
-        gmail_token_file="token.json"
+        enable_gmail_otp=enable_gmail_otp,
+        gmail_credentials_file=gmail_credentials_file,
+        gmail_token_file=gmail_token_file,
+        enable_gpt=enable_gpt,
+        gpt_model=gpt_model,
+        openai_api_key=openai_api_key
     )
     result = automation.run(application_input)
     return result.to_dict()
