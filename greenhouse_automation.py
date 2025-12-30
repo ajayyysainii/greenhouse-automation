@@ -167,7 +167,15 @@ class GreenhouseAutomation:
         
         # Store application context for GPT
         if self.enable_gpt:
-            self.application_context = application_input.to_dict() if hasattr(application_input, 'to_dict') else {}
+            try:
+                if hasattr(application_input, 'to_dict'):
+                    self.application_context = application_input.to_dict()
+                else:
+                    self.application_context = {}
+                    self.logger.warning("⚠️  application_input does not have to_dict() method, GPT context will be empty")
+            except Exception as e:
+                self.logger.warning(f"⚠️  Failed to create application context for GPT: {str(e)}")
+                self.application_context = {}
         
         try:
             # Wait for form to load
@@ -337,6 +345,13 @@ class GreenhouseAutomation:
                 if filled_count > 0:
                     self.logger.success(f"✨ GPT filled {filled_count} additional field(s)")
             
+            # IMPORTANT: Check all checkboxes before submitting
+            self.logger.info("☑️  Scanning for checkboxes before submission...")
+            sleep(0.5)
+            checked_count = self._check_all_checkboxes_with_gpt()
+            if checked_count > 0:
+                self.logger.success(f"✨ Checked {checked_count} checkbox(es)")
+            
             # Submit the form
             self.logger.info("Submitting application...")
             sleep(MEDIUM_WAIT)  # Wait a bit longer for form to be ready
@@ -423,6 +438,48 @@ class GreenhouseAutomation:
     def _fill_dropdown(self, selectors: list, value: str, field_name: str, required: bool = True, silent: bool = False) -> bool:
         """Fill a dropdown/select field - handles native select, React Select, and custom dropdowns"""
         from selenium.webdriver.support.ui import Select
+        
+        # If value is missing/empty and GPT is enabled, try to generate it from dropdown options
+        if (not value or not str(value).strip()) and self.enable_gpt and self.gpt_filler:
+            element = self.helper.find_element_by_multiple_selectors(selectors, silent=True)
+            if element:
+                try:
+                    # Get available options first
+                    tag_name = element.tag_name.lower()
+                    available_options = []
+                    
+                    if tag_name == "select":
+                        # Native select
+                        select = Select(element)
+                        available_options = [opt.text.strip() for opt in select.options 
+                                            if opt.text.strip() and opt.text.strip().lower() not in 
+                                            ['select', 'choose', 'please select', '-', '--', '---', '']]
+                    else:
+                        # React Select - need to open it first
+                        try:
+                            control_div = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select__control')]")
+                            if control_div:
+                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", control_div)
+                                sleep(0.3)
+                                control_div.click()
+                                sleep(0.8)
+                                
+                                option_elements = self.driver.find_elements(By.CSS_SELECTOR, '.select__option, .react-select__option')
+                                available_options = [opt.text.strip() for opt in option_elements if opt.text.strip()]
+                                
+                                # Close dropdown
+                                self.driver.find_element(By.TAG_NAME, 'body').click()
+                                sleep(0.3)
+                        except:
+                            pass
+                    
+                    if available_options:
+                        self.logger.info(f"🤖 Value not provided for dropdown '{field_name}', using GPT to select from options...")
+                        value = self.gpt_filler.select_from_dropdown(field_name, available_options, self.application_context)
+                        if value:
+                            self.logger.success(f"✅ GPT selected: {value}")
+                except Exception as e:
+                    self.logger.warning(f"⚠️  GPT dropdown selection failed for '{field_name}': {str(e)}")
         
         element = self.helper.find_element_by_multiple_selectors(selectors, silent=silent)
         if element:
@@ -1017,11 +1074,9 @@ class GreenhouseAutomation:
                     if not option_texts:
                         continue
                     
-                    # Ask GPT to choose from available options
-                    question = f"{label}\n\nAvailable options: {', '.join(option_texts)}\n\nChoose the most appropriate option from the list above."
+                    # Ask GPT to choose from available options using the specialized dropdown method
                     self.logger.info(f"🤖 Asking GPT to select from dropdown: {label}")
-                    
-                    answer = self.gpt_filler.get_answer(question, self.application_context)
+                    answer = self.gpt_filler.select_from_dropdown(label, option_texts, self.application_context)
                     
                     if answer and answer.strip():
                         # Try to select the GPT's choice
@@ -1098,11 +1153,9 @@ class GreenhouseAutomation:
                     option_texts = [opt.text.strip() for opt in option_elements if opt.text.strip()]
                     
                     if option_texts:
-                        # Ask GPT to choose
-                        question = f"{label}\n\nAvailable options: {', '.join(option_texts)}\n\nChoose the most appropriate option from the list above."
+                        # Ask GPT to choose using the specialized dropdown method
                         self.logger.info(f"🤖 Asking GPT to select from React dropdown: {label}")
-                        
-                        answer = self.gpt_filler.get_answer(question, self.application_context)
+                        answer = self.gpt_filler.select_from_dropdown(label, option_texts, self.application_context)
                         
                         if answer and answer.strip():
                             answer_clean = answer.strip()
@@ -1139,6 +1192,145 @@ class GreenhouseAutomation:
         except Exception as e:
             self.logger.error(f"Error scanning for unknown fields: {str(e)}")
             return filled_count
+    
+    def _check_all_checkboxes_with_gpt(self) -> int:
+        """Scan form for all checkboxes and check them if available"""
+        checked_count = 0
+        
+        try:
+            # Scroll through the page to ensure all checkboxes are loaded
+            self.logger.info("📄 Scrolling through form to find all checkboxes...")
+            self.driver.execute_script("window.scrollTo(0, 0);")
+            sleep(0.5)
+            
+            # Scroll to bottom to trigger any lazy-loaded fields
+            total_height = self.driver.execute_script("return document.body.scrollHeight")
+            viewport_height = self.driver.execute_script("return window.innerHeight")
+            current_position = 0
+            
+            while current_position < total_height:
+                self.driver.execute_script(f"window.scrollTo(0, {current_position});")
+                sleep(0.3)
+                current_position += viewport_height
+            
+            # Scroll back to top
+            self.driver.execute_script("window.scrollTo(0, 0);")
+            sleep(0.5)
+            
+            # Find all checkbox inputs
+            self.logger.info("🔍 Scanning for checkboxes...")
+            checkboxes = self.driver.find_elements(By.CSS_SELECTOR, 'input[type="checkbox"]')
+            
+            self.logger.info(f"   Found {len(checkboxes)} checkbox(es)")
+            
+            for checkbox in checkboxes:
+                try:
+                    # Skip if not displayed
+                    if not checkbox.is_displayed():
+                        continue
+                    
+                    # Skip if disabled or readonly
+                    if checkbox.get_attribute("disabled") or checkbox.get_attribute("readonly"):
+                        continue
+                    
+                    # Skip CAPTCHA checkboxes (these need manual interaction)
+                    checkbox_id = checkbox.get_attribute("id") or ""
+                    checkbox_class = checkbox.get_attribute("class") or ""
+                    checkbox_name = checkbox.get_attribute("name") or ""
+                    if any(keyword in (checkbox_id + checkbox_class + checkbox_name).lower() 
+                           for keyword in ['captcha', 'recaptcha', 'hcaptcha']):
+                        self.logger.info("⏭️  Skipping CAPTCHA checkbox")
+                        continue
+                    
+                    # Get the checkbox label for logging
+                    label = self._get_checkbox_label(checkbox)
+                    if not label:
+                        # Try to get from name or id attribute
+                        if checkbox_name:
+                            label = checkbox_name.replace("_", " ").replace("-", " ").title()
+                        elif checkbox_id:
+                            label = checkbox_id.replace("_", " ").replace("-", " ").title()
+                        else:
+                            label = "Checkbox"
+                    
+                    # Check if already checked
+                    is_checked = checkbox.is_selected()
+                    
+                    if not is_checked:
+                        # Check the checkbox
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+                        sleep(0.3)
+                        if not checkbox.is_selected():
+                            checkbox.click()
+                            self.logger.success(f"✅ Checked '{label}'")
+                            checked_count += 1
+                            sleep(0.3)
+                    else:
+                        self.logger.info(f"✓ '{label}' is already checked")
+                
+                except Exception as e:
+                    self.logger.warning(f"⚠️  Error processing checkbox: {str(e)}")
+                    continue
+            
+            return checked_count
+            
+        except Exception as e:
+            self.logger.error(f"Error scanning for checkboxes: {str(e)}")
+            return checked_count
+    
+    def _get_checkbox_label(self, checkbox_element) -> str:
+        """Get the label text associated with a checkbox"""
+        try:
+            # Method 1: Find associated label element via 'for' attribute
+            checkbox_id = checkbox_element.get_attribute("id")
+            if checkbox_id:
+                try:
+                    label = self.driver.find_element(By.CSS_SELECTOR, f'label[for="{checkbox_id}"]')
+                    if label and label.text.strip():
+                        return label.text.strip()
+                except:
+                    pass
+            
+            # Method 2: Find label that wraps the checkbox
+            try:
+                parent = checkbox_element.find_element(By.XPATH, "./ancestor::label")
+                if parent and parent.text.strip():
+                    return parent.text.strip()
+            except:
+                pass
+            
+            # Method 3: Find label in parent container
+            try:
+                parent = checkbox_element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'field') or contains(@class, 'form-group')]")
+                label_elem = parent.find_element(By.CSS_SELECTOR, "label")
+                if label_elem and label_elem.text.strip():
+                    return label_elem.text.strip()
+            except:
+                pass
+            
+            # Method 4: Find label by sibling relationship
+            try:
+                parent = checkbox_element.find_element(By.XPATH, "./..")
+                label_elem = parent.find_element(By.CSS_SELECTOR, "label")
+                if label_elem and label_elem.text.strip():
+                    return label_elem.text.strip()
+            except:
+                pass
+            
+            # Method 5: Find by aria-label
+            aria_label = checkbox_element.get_attribute("aria-label")
+            if aria_label and aria_label.strip():
+                return aria_label.strip()
+            
+            # Method 6: Find by title attribute
+            title = checkbox_element.get_attribute("title")
+            if title and title.strip():
+                return title.strip()
+            
+            return ""
+            
+        except Exception as e:
+            return ""
     
     def _handle_otp_verification(self) -> bool:
         """

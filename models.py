@@ -141,6 +141,113 @@ class GreenhouseApplicationInput:
             referred_by_employee=data.get("referredByEmployee"),
             referrer_name=data.get("referrerName")
         )
+    
+    def to_dict(self) -> dict:
+        """Convert GreenhouseApplicationInput to dictionary matching JSON format"""
+        result = {
+            "firstName": self.first_name,
+            "lastName": self.last_name,
+            "email": self.email,
+            "resumePath": self.resume_path,
+            "jobUrl": self.job_url,
+        }
+        
+        # Add optional fields if they exist
+        if self.preferred_first_name:
+            result["preferredFirstName"] = self.preferred_first_name
+        if self.phone:
+            result["phone"] = self.phone
+        if self.country:
+            result["country"] = self.country
+        if self.location_city:
+            result["locationCity"] = self.location_city
+        if self.cover_letter_path:
+            result["coverLetterPath"] = self.cover_letter_path
+        if self.linkedin_profile:
+            result["linkedinProfile"] = self.linkedin_profile
+        if self.github_profile:
+            result["githubProfile"] = self.github_profile
+        if self.portfolio:
+            result["portfolio"] = self.portfolio
+        if self.website:
+            result["website"] = self.website
+        
+        # Education entries
+        if self.education:
+            result["education"] = []
+            for edu in self.education:
+                edu_dict = {
+                    "school": edu.school,
+                    "degree": edu.degree,
+                }
+                if edu.discipline:
+                    edu_dict["discipline"] = edu.discipline
+                if edu.start_month:
+                    edu_dict["startMonth"] = edu.start_month
+                if edu.start_year:
+                    edu_dict["startYear"] = edu.start_year
+                if edu.end_month:
+                    edu_dict["endMonth"] = edu.end_month
+                if edu.end_year:
+                    edu_dict["endYear"] = edu.end_year
+                result["education"].append(edu_dict)
+        
+        # Employment entries
+        if self.employment:
+            result["employment"] = []
+            for emp in self.employment:
+                emp_dict = {
+                    "company": emp.company,
+                    "title": emp.title,
+                    "startMonth": emp.start_month,
+                    "startYear": emp.start_year,
+                    "currentRole": emp.current_role,
+                }
+                if emp.end_month:
+                    emp_dict["endMonth"] = emp.end_month
+                if emp.end_year:
+                    emp_dict["endYear"] = emp.end_year
+                result["employment"].append(emp_dict)
+        
+        # Voluntary self-identification
+        if self.gender:
+            result["gender"] = self.gender
+        if self.hispanic_latino:
+            result["hispanicLatino"] = self.hispanic_latino
+        if self.veteran_status:
+            result["veteranStatus"] = self.veteran_status
+        if self.disability_status:
+            result["disabilityStatus"] = self.disability_status
+        
+        # Work preferences
+        if self.languages:
+            result["languages"] = self.languages
+        if self.employment_types:
+            result["employmentTypes"] = self.employment_types
+        if self.worksites:
+            result["worksites"] = self.worksites
+        if self.location:
+            result["location"] = self.location
+        if self.willing_to_relocate:
+            result["willingToRelocate"] = self.willing_to_relocate
+        
+        # Company-specific questions
+        if self.hourly_expectations:
+            result["hourlyExpectations"] = self.hourly_expectations
+        if self.work_authorized:
+            result["workAuthorized"] = self.work_authorized
+        if self.require_sponsorship:
+            result["requireSponsorship"] = self.require_sponsorship
+        if self.open_to_relocate:
+            result["openToRelocate"] = self.open_to_relocate
+        if self.internship_dates:
+            result["internshipDates"] = self.internship_dates
+        if self.referred_by_employee:
+            result["referredByEmployee"] = self.referred_by_employee
+        if self.referrer_name:
+            result["referrerName"] = self.referrer_name
+        
+        return result
 
 
 @dataclass

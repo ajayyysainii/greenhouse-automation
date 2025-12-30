@@ -19,9 +19,16 @@ if os.path.exists('.env'):
                 os.environ[key] = value
 
 # Add parent directory to path to allow imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
-from greenhouse_automation.greenhouse_automation import run_automation
+# Import from the current package
+try:
+    from greenhouse_automation.greenhouse_automation import run_automation
+except ImportError:
+    # Fallback: try importing directly if we're in the package directory
+    from greenhouse_automation import run_automation
 
 
 def main():
