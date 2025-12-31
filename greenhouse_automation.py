@@ -167,15 +167,7 @@ class GreenhouseAutomation:
         
         # Store application context for GPT
         if self.enable_gpt:
-            try:
-                if hasattr(application_input, 'to_dict'):
-                    self.application_context = application_input.to_dict()
-                else:
-                    self.application_context = {}
-                    self.logger.warning("⚠️  application_input does not have to_dict() method, GPT context will be empty")
-            except Exception as e:
-                self.logger.warning(f"⚠️  Failed to create application context for GPT: {str(e)}")
-                self.application_context = {}
+            self.application_context = application_input.to_dict() if hasattr(application_input, 'to_dict') else {}
         
         try:
             # Wait for form to load
@@ -342,15 +334,10 @@ class GreenhouseAutomation:
                 self.logger.info("🔍 Scanning for unfilled fields to complete with GPT...")
                 sleep(1)  # Wait for any dynamic fields
                 filled_count = self._fill_unknown_fields_with_gpt()
-                if filled_count > 0:
-                    self.logger.success(f"✨ GPT filled {filled_count} additional field(s)")
-            
-            # IMPORTANT: Check all checkboxes before submitting
-            self.logger.info("☑️  Scanning for checkboxes before submission...")
-            sleep(0.5)
-            checked_count = self._check_all_checkboxes_with_gpt()
-            if checked_count > 0:
-                self.logger.success(f"✨ Checked {checked_count} checkbox(es)")
+                choice_count = self._fill_remaining_choice_fields_with_gpt()
+                total_filled = filled_count + choice_count
+                if total_filled > 0:
+                    self.logger.success(f"✨ GPT filled {total_filled} additional field(s) (including {choice_count} choice field(s))")
             
             # Submit the form
             self.logger.info("Submitting application...")
@@ -439,47 +426,9 @@ class GreenhouseAutomation:
         """Fill a dropdown/select field - handles native select, React Select, and custom dropdowns"""
         from selenium.webdriver.support.ui import Select
         
-        # If value is missing/empty and GPT is enabled, try to generate it from dropdown options
+        # If no value provided and GPT is enabled, try to get options first and ask GPT
         if (not value or not str(value).strip()) and self.enable_gpt and self.gpt_filler:
-            element = self.helper.find_element_by_multiple_selectors(selectors, silent=True)
-            if element:
-                try:
-                    # Get available options first
-                    tag_name = element.tag_name.lower()
-                    available_options = []
-                    
-                    if tag_name == "select":
-                        # Native select
-                        select = Select(element)
-                        available_options = [opt.text.strip() for opt in select.options 
-                                            if opt.text.strip() and opt.text.strip().lower() not in 
-                                            ['select', 'choose', 'please select', '-', '--', '---', '']]
-                    else:
-                        # React Select - need to open it first
-                        try:
-                            control_div = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select__control')]")
-                            if control_div:
-                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", control_div)
-                                sleep(0.3)
-                                control_div.click()
-                                sleep(0.8)
-                                
-                                option_elements = self.driver.find_elements(By.CSS_SELECTOR, '.select__option, .react-select__option')
-                                available_options = [opt.text.strip() for opt in option_elements if opt.text.strip()]
-                                
-                                # Close dropdown
-                                self.driver.find_element(By.TAG_NAME, 'body').click()
-                                sleep(0.3)
-                        except:
-                            pass
-                    
-                    if available_options:
-                        self.logger.info(f"🤖 Value not provided for dropdown '{field_name}', using GPT to select from options...")
-                        value = self.gpt_filler.select_from_dropdown(field_name, available_options, self.application_context)
-                        if value:
-                            self.logger.success(f"✅ GPT selected: {value}")
-                except Exception as e:
-                    self.logger.warning(f"⚠️  GPT dropdown selection failed for '{field_name}': {str(e)}")
+            self.logger.info(f"🤖 No value provided for '{field_name}', will retrieve options and ask GPT...")
         
         element = self.helper.find_element_by_multiple_selectors(selectors, silent=silent)
         if element:
@@ -494,329 +443,89 @@ class GreenhouseAutomation:
                         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
                         sleep(0.3)
                         
-                        try:
-                            select.select_by_visible_text(value)
-                            self.logger.info(f"Selected '{value}' in {field_name} (by visible text)")
-                            return True
-                        except:
+                        option_texts = [opt.text.strip() for opt in select.options if opt.text.strip()]
+                        
+                        # Remove placeholder options
+                        cleaned_options = [opt for opt in option_texts 
+                                         if opt.lower() not in ["select", "choose", "select one", 
+                                                               "select an option", "-", "--", "---", ""]]
+                        
+                        # If no value provided, ask GPT to choose from options
+                        if (not value or not str(value).strip()) and self.enable_gpt and self.gpt_filler:
+                            if cleaned_options:
+                                gpt_choice = self._ask_gpt_dropdown_choice(field_name, cleaned_options, desired_value=None)
+                                if gpt_choice:
+                                    value = gpt_choice
+                                    self.logger.success(f"✅ GPT selected: {value}")
+                        
+                        # First try to match provided value if we have one
+                        if value:
+                            value_lower = value.lower().strip()
+                            
+                            # Try exact match first
+                            try:
+                                select.select_by_visible_text(value)
+                                self.logger.info(f"Selected '{value}' in {field_name} (exact match)")
+                                return True
+                            except:
+                                pass
+                            
+                            # Try value attribute match
                             try:
                                 select.select_by_value(value)
                                 self.logger.info(f"Selected '{value}' in {field_name} (by value)")
                                 return True
                             except:
-                                # Try partial match
-                                options = select.options
-                                for option in options:
-                                    if value.lower() in option.text.lower() or option.text.lower() in value.lower():
-                                        select.select_by_visible_text(option.text)
-                                        self.logger.info(f"Selected '{option.text}' in {field_name} (partial match)")
-                                        return True
+                                pass
+                            
+                            # Try case-insensitive exact match
+                            for option in select.options:
+                                opt_text = option.text.strip()
+                                if opt_text.lower() == value_lower:
+                                    select.select_by_visible_text(opt_text)
+                                    self.logger.info(f"Selected '{opt_text}' in {field_name} (case-insensitive)")
+                                    return True
+                            
+                            # Try partial match (value in option or option in value)
+                            for option in select.options:
+                                opt_text = option.text.strip()
+                                opt_lower = opt_text.lower()
+                                if value_lower in opt_lower or opt_lower in value_lower:
+                                    select.select_by_visible_text(opt_text)
+                                    self.logger.info(f"Selected '{opt_text}' in {field_name} (partial match)")
+                                    return True
+                            
+                            # If no match found, ask GPT with the desired value as context
+                            if self.enable_gpt and self.gpt_filler and cleaned_options:
+                                self.logger.info(f"No direct match for '{value}', asking GPT...")
+                                gpt_choice = self._ask_gpt_dropdown_choice(field_name, cleaned_options, desired_value=value)
+                                if gpt_choice:
+                                    gpt_lower = gpt_choice.lower().strip()
+                                    for option in select.options:
+                                        opt_text = option.text.strip()
+                                        if opt_text.lower() == gpt_lower or gpt_lower in opt_text.lower():
+                                            select.select_by_visible_text(opt_text)
+                                            self.logger.info(f"Selected '{opt_text}' in {field_name} (GPT choice)")
+                                            return True
+                        
+                        # As a last resort for required fields, pick first valid option
+                        if required and cleaned_options:
+                            select.select_by_visible_text(cleaned_options[0])
+                            self.logger.info(f"Selected '{cleaned_options[0]}' in {field_name} (fallback)")
+                            return True
+                            
                     except Exception as e:
                         if not silent:
                             self.logger.error(f"Failed to select native dropdown {field_name}", e)
                 
-                # React Select component (most common in Greenhouse)
-                # Check if it's a React Select input (check by class, ID, or by parent structure)
-                is_react_select = False
-                if element.tag_name.lower() == "input":
-                    element_class = element.get_attribute("class") or ""
-                    element_id = element.get_attribute("id") or ""
-                    
-                    # Check if it has select__input class
-                    if "select__input" in element_class:
-                        is_react_select = True
-                    # Check if it's candidate-location or country (known React Select fields)
-                    elif "candidate-location" in element_id or element_id == "country":
-                        is_react_select = True
-                    else:
-                        # Check if parent has select__control class
-                        try:
-                            parent = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select__control')]")
-                            if parent:
-                                is_react_select = True
-                        except:
-                            # Also check for select-shell parent
-                            try:
-                                parent = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select-shell')]")
-                                if parent:
-                                    is_react_select = True
-                            except:
-                                pass
+                # Check if it's a React Select
+                is_react_select = self._is_react_select(element)
                 
                 if is_react_select:
-                    try:
-                        # Find the parent select__control div
-                        try:
-                            control_div = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select__control')]")
-                        except:
-                            # Try alternative path
-                            control_div = element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'select-shell')]//div[contains(@class, 'select__control')]")
-                        
-                        if control_div:
-                            # Scroll into view
-                            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", control_div)
-                            sleep(0.3)
-                            
-                            # Click the control to open dropdown
-                            try:
-                                control_div.click()
-                            except:
-                                # Try clicking the toggle button
-                                toggle_btn = control_div.find_element(By.CSS_SELECTOR, "button.icon-button, button[aria-label*='Toggle']")
-                                toggle_btn.click()
-                            sleep(0.8)  # Wait for menu to appear
-                            
-                            # React Select menu options are typically in a menu with role="listbox" or class="select__menu"
-                            value_lower = value.lower().strip()
-                            
-                            # First check if menu is open and has options
-                            try:
-                                # Check for "no options" message
-                                no_options_msg = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'select__menu')]//div[contains(@class, 'no-options') or contains(text(), 'No options') or contains(text(), 'No results found')]")
-                                if no_options_msg and any(msg.is_displayed() for msg in no_options_msg):
-                                    self.logger.info(f"No options message found for '{value}' in {field_name}")
-                                    return False  # Return False to trigger fallback
-                            except:
-                                pass
-                            
-                            # Get all available options from the dropdown
-                            all_option_selectors = [
-                                "//div[contains(@class, 'select__menu')]//div[@role='option']",
-                                "//div[@role='listbox']//div[@role='option']",
-                                "//div[contains(@class, 'select__menu')]//div[contains(@class, 'option')]",
-                                f"//div[@id='react-select-{element.get_attribute('id')}-listbox']//div[@role='option']"
-                            ]
-                            
-                            all_options = []
-                            for selector in all_option_selectors:
-                                try:
-                                    options = self.driver.find_elements(By.XPATH, selector)
-                                    visible_options = [opt for opt in options if opt.is_displayed()]
-                                    if visible_options:
-                                        all_options = visible_options
-                                        break
-                                except:
-                                    continue
-                            
-                            if not all_options:
-                                self.logger.info(f"No options found in dropdown for '{value}' in {field_name}")
-                                return False
-                            
-                            # Go through all options and find exact matches first
-                            exact_matches = []
-                            partial_matches = []
-                            
-                            for option in all_options:
-                                try:
-                                    option_text = option.text.strip()
-                                    option_text_lower = option_text.lower().strip()
-                                    
-                                    # Check for exact match (case-insensitive)
-                                    if option_text_lower == value_lower:
-                                        exact_matches.append((option, option_text))
-                                    # Check for partial match (contains)
-                                    elif value_lower in option_text_lower:
-                                        partial_matches.append((option, option_text))
-                                except:
-                                    continue
-                            
-                            # Prioritize exact matches
-                            if exact_matches:
-                                self.logger.info(f"Found {len(exact_matches)} exact match(es) for '{value}' in {field_name}")
-                                # Select the first exact match
-                                option, option_text = exact_matches[0]
-                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
-                                sleep(0.2)
-                                try:
-                                    option.click()
-                                except:
-                                    self.driver.execute_script("arguments[0].click();", option)
-                                sleep(0.5)
-                                self.logger.info(f"Selected exact match '{option_text}' for '{value}' in {field_name}")
-                                return True
-                            
-                            # If no exact match, try partial matches
-                            if partial_matches:
-                                self.logger.info(f"Found {len(partial_matches)} partial match(es) for '{value}' in {field_name}")
-                                # Select the first partial match
-                                option, option_text = partial_matches[0]
-                                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
-                                sleep(0.2)
-                                try:
-                                    option.click()
-                                except:
-                                    self.driver.execute_script("arguments[0].click();", option)
-                                sleep(0.5)
-                                self.logger.info(f"Selected partial match '{option_text}' for '{value}' in {field_name}")
-                                return True
-                            
-                            # If no matches found, log all available options for debugging
-                            try:
-                                available_options = [opt.text.strip() for opt in all_options[:10]]  # First 10 options
-                                self.logger.info(f"No match found for '{value}'. Available options: {available_options}")
-                            except:
-                                pass
-                            
-                            # If we get here, no options were found
-                            # Check one more time if menu is empty
-                            try:
-                                all_menu_options = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'select__menu')]//div[@role='option']")
-                                if not all_menu_options or not any(opt.is_displayed() for opt in all_menu_options):
-                                    self.logger.info(f"No options found in dropdown for '{value}' in {field_name}")
-                                    return False  # Return False to trigger fallback
-                            except:
-                                pass
-                            
-                            # Alternative: Type into the input and wait for autocomplete
-                            try:
-                                element.clear()
-                                element.send_keys(value)
-                                sleep(1.0)  # Wait for options to filter (longer for location autocomplete)
-                                
-                                # For location fields, wait a bit more for autocomplete
-                                if "location" in field_name.lower() or "candidate-location" in element.get_attribute("id") or "":
-                                    sleep(0.5)
-                                
-                                # Check if any options are available in the dropdown
-                                try:
-                                    # Check for "no options" message or empty menu
-                                    no_options = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'select__menu')]//div[contains(@class, 'no-options') or contains(text(), 'No options') or contains(text(), 'No results')]")
-                                    if no_options and any(opt.is_displayed() for opt in no_options):
-                                        self.logger.info(f"No options found for '{value}' in {field_name}")
-                                        return False  # Return False to trigger fallback
-                                    
-                                    # Get all filtered options after typing
-                                    filtered_options = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'select__menu')]//div[@role='option']")
-                                    visible_filtered = [opt for opt in filtered_options if opt.is_displayed()]
-                                    
-                                    if not visible_filtered:
-                                        # No visible options found
-                                        self.logger.info(f"No visible options found for '{value}' in {field_name}")
-                                        return False  # Return False to trigger fallback
-                                    
-                                    # Go through all filtered options and find exact matches first
-                                    exact_matches = []
-                                    partial_matches = []
-                                    
-                                    for option in visible_filtered:
-                                        try:
-                                            option_text = option.text.strip()
-                                            option_text_lower = option_text.lower().strip()
-                                            
-                                            # Check for exact match (case-insensitive)
-                                            if option_text_lower == value_lower:
-                                                exact_matches.append((option, option_text))
-                                            # Check for partial match (contains)
-                                            elif value_lower in option_text_lower:
-                                                partial_matches.append((option, option_text))
-                                        except:
-                                            continue
-                                    
-                                    # Prioritize exact matches
-                                    if exact_matches:
-                                        self.logger.info(f"Found {len(exact_matches)} exact match(es) after typing '{value}' in {field_name}")
-                                        option, option_text = exact_matches[0]
-                                        option.click()
-                                        sleep(0.3)
-                                        self.logger.info(f"Selected exact match '{option_text}' for '{value}' in {field_name}")
-                                        return True
-                                    
-                                    # If no exact match, try partial matches
-                                    if partial_matches:
-                                        self.logger.info(f"Found {len(partial_matches)} partial match(es) after typing '{value}' in {field_name}")
-                                        option, option_text = partial_matches[0]
-                                        option.click()
-                                        sleep(0.3)
-                                        self.logger.info(f"Selected partial match '{option_text}' for '{value}' in {field_name}")
-                                        return True
-                                    
-                                    # If no match, try first visible option
-                                    if visible_filtered:
-                                        visible_filtered[0].click()
-                                        sleep(0.3)
-                                        self.logger.info(f"Selected first filtered option for '{value}' in {field_name}")
-                                        return True
-                                    else:
-                                        # No options available
-                                        self.logger.info(f"No options available for '{value}' in {field_name}")
-                                        return False
-                                except Exception as e:
-                                    # If we can't find options, try pressing Enter
-                                    try:
-                                        element.send_keys(Keys.ENTER)
-                                        sleep(0.5)
-                                        # Check if value was actually selected by checking the input value
-                                        current_value = element.get_attribute("value") or ""
-                                        if current_value.lower() == value.lower() or value.lower() in current_value.lower():
-                                            self.logger.info(f"Selected '{value}' in {field_name} (typed and Enter)")
-                                            return True
-                                        else:
-                                            self.logger.info(f"Value not selected after Enter, no options available")
-                                            return False
-                                    except:
-                                        return False
-                            except Exception as e:
-                                if not silent:
-                                    self.logger.error(f"Failed to type and select in React Select {field_name}", e)
-                                return False
-                            
-                    except Exception as e:
-                        if not silent:
-                            self.logger.error(f"Failed to select React Select {field_name}", e)
+                    return self._fill_react_select(element, value, field_name, silent)
                 
-                # Custom dropdown (div-based) - try clicking approach
-                try:
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                    sleep(0.3)
-                    
-                    # Click to open dropdown
-                    try:
-                        element.click()
-                    except:
-                        self.driver.execute_script("arguments[0].click();", element)
-                    sleep(0.8)
-                    
-                    # Try to find and click the option
-                    value_lower = value.lower()
-                    option_xpaths = [
-                        f"//option[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
-                        f"//li[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
-                        f"//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
-                        f"//*[@role='option' and contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]"
-                    ]
-                    
-                    for option_xpath in option_xpaths:
-                        try:
-                            options = self.driver.find_elements(By.XPATH, option_xpath)
-                            for option in options:
-                                if option.is_displayed():
-                                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
-                                    sleep(0.2)
-                                    try:
-                                        option.click()
-                                    except:
-                                        self.driver.execute_script("arguments[0].click();", option)
-                                    sleep(0.3)
-                                    self.logger.info(f"Selected '{value}' in {field_name} (custom dropdown)")
-                                    return True
-                        except:
-                            continue
-                    
-                    # Alternative: Type the value and press Enter (if it's an input)
-                    if element.tag_name.lower() == "input":
-                        element.clear()
-                        element.send_keys(value)
-                        sleep(0.3)
-                        element.send_keys(Keys.ENTER)
-                        sleep(0.3)
-                        self.logger.info(f"Selected '{value}' in {field_name} (typed and Enter)")
-                        return True
-                    
-                except Exception as e:
-                    if not silent:
-                        self.logger.error(f"Failed to select custom dropdown {field_name}", e)
-                
-                return False
+                # Custom dropdown fallback
+                return self._fill_custom_dropdown(element, value, field_name, silent)
                 
             except Exception as e:
                 if not silent:
@@ -828,6 +537,281 @@ class GreenhouseAutomation:
             elif not silent:
                 self.logger.info(f"Optional dropdown not found (skipping): {field_name}")
             return not required
+    
+    def _is_react_select(self, element) -> bool:
+        """Check if element is a React Select component"""
+        if element.tag_name.lower() != "input":
+            return False
+        
+        element_class = element.get_attribute("class") or ""
+        element_id = element.get_attribute("id") or ""
+        
+        # Check class
+        if "select__input" in element_class:
+            return True
+        
+        # Check ID patterns
+        if "candidate-location" in element_id or element_id == "country":
+            return True
+        
+        # Check parent structure
+        try:
+            parent = element.find_element(By.XPATH, 
+                "./ancestor::div[contains(@class, 'select__control') or contains(@class, 'select-shell')]")
+            return parent is not None
+        except:
+            return False
+    
+    def _fill_react_select(self, element, value: str, field_name: str, silent: bool) -> bool:
+        """Fill a React Select dropdown"""
+        try:
+            # Find the control div
+            try:
+                control_div = element.find_element(By.XPATH, 
+                    "./ancestor::div[contains(@class, 'select__control')]")
+            except:
+                control_div = element.find_element(By.XPATH, 
+                    "./ancestor::div[contains(@class, 'select-shell')]//div[contains(@class, 'select__control')]")
+            
+            # Scroll and click to open
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", control_div)
+            sleep(0.3)
+            
+            try:
+                control_div.click()
+            except:
+                try:
+                    toggle_btn = control_div.find_element(By.CSS_SELECTOR, 
+                        "button.icon-button, button[aria-label*='Toggle']")
+                    toggle_btn.click()
+                except:
+                    pass
+            
+            sleep(0.8)
+            
+            # Get all options
+            all_options = self._get_react_select_options()
+            
+            if not all_options:
+                self.logger.info(f"No options found in React Select for '{field_name}'")
+                return False
+            
+            # Extract option texts
+            option_texts = []
+            option_map = {}  # Map text to element
+            for opt in all_options:
+                try:
+                    opt_text = opt.text.strip()
+                    if opt_text:
+                        option_texts.append(opt_text)
+                        option_map[opt_text.lower()] = opt
+                except:
+                    continue
+            
+            # If no value provided, ask GPT
+            if (not value or not str(value).strip()) and self.enable_gpt and self.gpt_filler:
+                if option_texts:
+                    gpt_choice = self._ask_gpt_dropdown_choice(field_name, option_texts, desired_value=None)
+                    if gpt_choice:
+                        value = gpt_choice
+                        self.logger.success(f"✅ GPT selected: {value}")
+            
+            if not value or not str(value).strip():
+                self.logger.warning(f"No value to select for {field_name}")
+                return False
+            
+            value_lower = value.lower().strip()
+            
+            # Try exact match (case-insensitive)
+            if value_lower in option_map:
+                option = option_map[value_lower]
+                self._click_option(option)
+                self.logger.info(f"Selected exact match '{value}' in {field_name}")
+                return True
+            
+            # Try partial match
+            for opt_text, opt_elem in option_map.items():
+                if value_lower in opt_text or opt_text in value_lower:
+                    self._click_option(opt_elem)
+                    self.logger.info(f"Selected partial match '{opt_text}' in {field_name}")
+                    return True
+            
+            # Ask GPT to choose from available options
+            if self.enable_gpt and self.gpt_filler:
+                self.logger.info(f"No match for '{value}', asking GPT to choose from {len(option_texts)} options...")
+                gpt_choice = self._ask_gpt_dropdown_choice(field_name, option_texts, desired_value=value)
+                if gpt_choice:
+                    gpt_lower = gpt_choice.lower().strip()
+                    
+                    # Try exact match with GPT choice
+                    if gpt_lower in option_map:
+                        option = option_map[gpt_lower]
+                        self._click_option(option)
+                        self.logger.info(f"Selected '{gpt_choice}' in {field_name} (GPT choice)")
+                        return True
+                    
+                    # Try partial match with GPT choice
+                    for opt_text, opt_elem in option_map.items():
+                        if gpt_lower in opt_text or opt_text in gpt_lower:
+                            self._click_option(opt_elem)
+                            self.logger.info(f"Selected '{opt_text}' in {field_name} (GPT partial)")
+                            return True
+            
+            # If still no match, try typing and autocomplete
+            return self._try_react_select_autocomplete(element, value, field_name, option_texts)
+            
+        except Exception as e:
+            if not silent:
+                self.logger.error(f"Failed to fill React Select {field_name}", e)
+            return False
+    
+    def _get_react_select_options(self):
+        """Get all visible options from React Select menu"""
+        all_option_selectors = [
+            "//div[contains(@class, 'select__menu')]//div[@role='option']",
+            "//div[@role='listbox']//div[@role='option']",
+            "//div[contains(@class, 'select__menu')]//div[contains(@class, 'option')]",
+        ]
+        
+        for selector in all_option_selectors:
+            try:
+                options = self.driver.find_elements(By.XPATH, selector)
+                visible_options = [opt for opt in options if opt.is_displayed()]
+                if visible_options:
+                    return visible_options
+            except:
+                continue
+        
+        return []
+    
+    def _click_option(self, option):
+        """Click a dropdown option (with fallback to JS click)"""
+        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", option)
+        sleep(0.2)
+        try:
+            option.click()
+        except:
+            self.driver.execute_script("arguments[0].click();", option)
+        sleep(0.5)
+    
+    def _try_react_select_autocomplete(self, element, value: str, field_name: str, option_texts: list) -> bool:
+        """Try typing into React Select to use autocomplete"""
+        try:
+            element.clear()
+            element.send_keys(value)
+            sleep(1.0)
+            
+            # Check for "no options" message
+            try:
+                no_options = self.driver.find_elements(By.XPATH, 
+                    "//div[contains(@class, 'select__menu')]//div[contains(@class, 'no-options') or contains(text(), 'No options')]")
+                if no_options and any(opt.is_displayed() for opt in no_options):
+                    self.logger.info(f"No options found for '{value}' in {field_name}")
+                    return False
+            except:
+                pass
+            
+            # Get filtered options
+            filtered_options = self._get_react_select_options()
+            
+            if not filtered_options:
+                self.logger.info(f"No filtered options for '{value}' in {field_name}")
+                return False
+            
+            # Build option map
+            filtered_map = {}
+            filtered_texts = []
+            for opt in filtered_options:
+                try:
+                    opt_text = opt.text.strip()
+                    if opt_text:
+                        filtered_texts.append(opt_text)
+                        filtered_map[opt_text.lower()] = opt
+                except:
+                    continue
+            
+            value_lower = value.lower().strip()
+            
+            # Try exact match in filtered
+            if value_lower in filtered_map:
+                self._click_option(filtered_map[value_lower])
+                self.logger.info(f"Selected '{value}' in {field_name} (autocomplete exact)")
+                return True
+            
+            # Try partial match in filtered
+            for opt_text, opt_elem in filtered_map.items():
+                if value_lower in opt_text or opt_text in value_lower:
+                    self._click_option(opt_elem)
+                    self.logger.info(f"Selected '{opt_text}' in {field_name} (autocomplete partial)")
+                    return True
+            
+            # Ask GPT from filtered options
+            if self.enable_gpt and self.gpt_filler and filtered_texts:
+                gpt_choice = self._ask_gpt_dropdown_choice(field_name, filtered_texts, desired_value=value)
+                if gpt_choice:
+                    gpt_lower = gpt_choice.lower().strip()
+                    if gpt_lower in filtered_map:
+                        self._click_option(filtered_map[gpt_lower])
+                        self.logger.info(f"Selected '{gpt_choice}' in {field_name} (GPT filtered)")
+                        return True
+                    
+                    for opt_text, opt_elem in filtered_map.items():
+                        if gpt_lower in opt_text:
+                            self._click_option(opt_elem)
+                            self.logger.info(f"Selected '{opt_text}' in {field_name} (GPT filtered partial)")
+                            return True
+            
+            # Last resort: select first filtered option
+            if filtered_options:
+                self._click_option(filtered_options[0])
+                self.logger.info(f"Selected first filtered option in {field_name}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Autocomplete failed for {field_name}: {str(e)}")
+            return False
+    
+    def _fill_custom_dropdown(self, element, value: str, field_name: str, silent: bool) -> bool:
+        """Fill custom (div-based) dropdown"""
+        try:
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+            sleep(0.3)
+            
+            # Click to open
+            try:
+                element.click()
+            except:
+                self.driver.execute_script("arguments[0].click();", element)
+            sleep(0.8)
+            
+            # Try to find options
+            value_lower = value.lower() if value else ""
+            option_xpaths = [
+                f"//option[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
+                f"//li[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
+                f"//div[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]",
+                f"//*[@role='option' and contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{value_lower}')]"
+            ]
+            
+            for option_xpath in option_xpaths:
+                try:
+                    options = self.driver.find_elements(By.XPATH, option_xpath)
+                    for option in options:
+                        if option.is_displayed():
+                            self._click_option(option)
+                            self.logger.info(f"Selected '{value}' in {field_name} (custom dropdown)")
+                            return True
+                except:
+                    continue
+            
+            return False
+            
+        except Exception as e:
+            if not silent:
+                self.logger.error(f"Failed to select custom dropdown {field_name}", e)
+            return False
     
     def _get_field_label(self, element) -> str:
         """Extract the label/question text for a form field"""
@@ -919,6 +903,93 @@ class GreenhouseAutomation:
             
         except Exception as e:
             return None
+
+    def _get_option_label(self, element) -> str:
+        """Extract label text for a specific option element (radio/checkbox)"""
+        try:
+            option_id = element.get_attribute("id")
+            if option_id:
+                labels = self.driver.find_elements(By.CSS_SELECTOR, f'label[for="{option_id}"]')
+                if labels and labels[0].text.strip():
+                    return labels[0].text.strip()
+            
+            try:
+                parent_label = element.find_element(By.XPATH, "./ancestor::label[1]")
+                if parent_label and parent_label.text.strip():
+                    return parent_label.text.strip()
+            except:
+                pass
+            
+            value = element.get_attribute("value")
+            if value:
+                return value
+        except:
+            pass
+        return ""
+
+    def _ask_gpt_dropdown_choice(self, field_name: str, options: list, desired_value: str = None) -> str:
+        """Ask GPT to pick the best option from a dropdown list"""
+        if not (self.enable_gpt and self.gpt_filler):
+            return None
+        
+        # Deduplicate and clean options
+        cleaned = []
+        seen = set()
+        for opt in options:
+            if not opt:
+                continue
+            opt_clean = opt.strip()
+            if not opt_clean:
+                continue
+            lower = opt_clean.lower()
+            if lower in ["select", "choose", "select one", "select an option", "-", "--", "---"]:
+                continue
+            if lower not in seen:
+                cleaned.append(opt_clean)
+                seen.add(lower)
+        
+        if not cleaned:
+            return None
+        
+        # Build prompt
+        prompt = f"Question: {field_name}\n\nAvailable options:\n"
+        for i, opt in enumerate(cleaned, 1):
+            prompt += f"{i}. {opt}\n"
+        
+        if desired_value:
+            prompt += f"\nPreferred answer (if applicable): {desired_value}\n"
+        
+        prompt += "\nIMPORTANT: Respond with ONLY the option text exactly as written above. Choose the single best option from the numbered list."
+        
+        try:
+            self.logger.info(f"🤖 Asking GPT to choose from {len(cleaned)} options for '{field_name}'")
+            answer = self.gpt_filler.get_answer(prompt, self.application_context)
+            
+            if not answer:
+                return None
+            
+            answer_clean = answer.strip()
+            
+            # Remove number prefix if GPT included it (e.g., "1. Option" -> "Option")
+            import re
+            match = re.match(r'^\d+[\.\)]\s*(.+)$', answer_clean)
+            if match:
+                answer_clean = match.group(1).strip()
+            
+            # Verify the answer is actually in our options (case-insensitive)
+            answer_lower = answer_clean.lower()
+            for opt in cleaned:
+                if opt.lower() == answer_lower or answer_lower in opt.lower() or opt.lower() in answer_lower:
+                    self.logger.success(f"✅ GPT chose: {opt}")
+                    return opt
+            
+            # If GPT's answer doesn't match, return the closest match
+            self.logger.warning(f"⚠️ GPT answer '{answer_clean}' not in options, using first option")
+            return cleaned[0]
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️ GPT dropdown choice failed for {field_name}: {str(e)}")
+            return None
     
     def _fill_unknown_fields_with_gpt(self) -> int:
         """Scan form for empty text fields and textareas, fill them with GPT"""
@@ -951,7 +1022,7 @@ class GreenhouseAutomation:
             self.logger.info("🔍 Scanning for ALL empty input fields...")
             text_fields = self.driver.find_elements(
                 By.CSS_SELECTOR,
-                'input[type="text"], input[type="url"], input[type="number"], input[type="tel"], input:not([type]), textarea'
+                'input[type="text"], input[type="url"], input[type="number"], input[type="tel"], input[type="date"], input[type="datetime-local"], input[type="time"], input:not([type]), textarea'
             )
             
             self.logger.info(f"   Found {len(text_fields)} input fields to check")
@@ -1074,9 +1145,11 @@ class GreenhouseAutomation:
                     if not option_texts:
                         continue
                     
-                    # Ask GPT to choose from available options using the specialized dropdown method
+                    # Ask GPT to choose from available options
+                    question = f"{label}\n\nAvailable options: {', '.join(option_texts)}\n\nChoose the most appropriate option from the list above."
                     self.logger.info(f"🤖 Asking GPT to select from dropdown: {label}")
-                    answer = self.gpt_filler.select_from_dropdown(label, option_texts, self.application_context)
+                    
+                    answer = self.gpt_filler.get_answer(question, self.application_context)
                     
                     if answer and answer.strip():
                         # Try to select the GPT's choice
@@ -1153,9 +1226,11 @@ class GreenhouseAutomation:
                     option_texts = [opt.text.strip() for opt in option_elements if opt.text.strip()]
                     
                     if option_texts:
-                        # Ask GPT to choose using the specialized dropdown method
+                        # Ask GPT to choose
+                        question = f"{label}\n\nAvailable options: {', '.join(option_texts)}\n\nChoose the most appropriate option from the list above."
                         self.logger.info(f"🤖 Asking GPT to select from React dropdown: {label}")
-                        answer = self.gpt_filler.select_from_dropdown(label, option_texts, self.application_context)
+                        
+                        answer = self.gpt_filler.get_answer(question, self.application_context)
                         
                         if answer and answer.strip():
                             answer_clean = answer.strip()
@@ -1192,145 +1267,117 @@ class GreenhouseAutomation:
         except Exception as e:
             self.logger.error(f"Error scanning for unknown fields: {str(e)}")
             return filled_count
-    
-    def _check_all_checkboxes_with_gpt(self) -> int:
-        """Scan form for all checkboxes and check them if available"""
-        checked_count = 0
+
+    def _fill_remaining_choice_fields_with_gpt(self) -> int:
+        """
+        Fill radio groups and required/obvious checkboxes that are still empty.
+        Returns number of fields filled.
+        """
+        gpt_available = self.enable_gpt and self.gpt_filler
         
+        filled_count = 0
+        
+        # Radios
         try:
-            # Scroll through the page to ensure all checkboxes are loaded
-            self.logger.info("📄 Scrolling through form to find all checkboxes...")
-            self.driver.execute_script("window.scrollTo(0, 0);")
-            sleep(0.5)
+            self.logger.info("🔍 Scanning for unanswered radio groups...")
+            radio_inputs = [
+                inp for inp in self.driver.find_elements(By.CSS_SELECTOR, 'input[type="radio"]')
+                if inp.is_displayed() and inp.is_enabled()
+            ]
             
-            # Scroll to bottom to trigger any lazy-loaded fields
-            total_height = self.driver.execute_script("return document.body.scrollHeight")
-            viewport_height = self.driver.execute_script("return window.innerHeight")
-            current_position = 0
+            radio_groups = {}
+            for radio in radio_inputs:
+                group_name = radio.get_attribute("name") or radio.get_attribute("id") or f"radio-{len(radio_groups)}"
+                radio_groups.setdefault(group_name, []).append(radio)
             
-            while current_position < total_height:
-                self.driver.execute_script(f"window.scrollTo(0, {current_position});")
-                sleep(0.3)
-                current_position += viewport_height
-            
-            # Scroll back to top
-            self.driver.execute_script("window.scrollTo(0, 0);")
-            sleep(0.5)
-            
-            # Find all checkbox inputs
-            self.logger.info("🔍 Scanning for checkboxes...")
-            checkboxes = self.driver.find_elements(By.CSS_SELECTOR, 'input[type="checkbox"]')
-            
-            self.logger.info(f"   Found {len(checkboxes)} checkbox(es)")
+            for group_name, inputs in radio_groups.items():
+                try:
+                    if any(inp.is_selected() for inp in inputs):
+                        continue
+                    
+                    group_label = self._get_field_label(inputs[0]) or group_name
+                    options = []
+                    for opt in inputs:
+                        label_text = self._get_option_label(opt)
+                        options.append((opt, label_text))
+                    
+                    option_texts = [text for _, text in options if text]
+                    chosen_option = None
+                    
+                    if option_texts and gpt_available:
+                        question = f"{group_label}\n\nAvailable options: {', '.join(option_texts)}\n\nChoose the most appropriate option from the list above."
+                        answer = self.gpt_filler.get_answer(question, self.application_context)
+                        if answer:
+                            answer_lower = answer.strip().lower()
+                            for opt, text in options:
+                                if text and (text.strip().lower() == answer_lower or answer_lower in text.strip().lower()):
+                                    chosen_option = opt
+                                    break
+                    
+                    if not chosen_option and options:
+                        chosen_option = options[0][0]
+                    
+                    if chosen_option:
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", chosen_option)
+                        sleep(0.2)
+                        try:
+                            chosen_option.click()
+                        except:
+                            self.driver.execute_script("arguments[0].click();", chosen_option)
+                        filled_count += 1
+                        self.logger.success(f"✅ Selected radio option for '{group_label}'")
+                        sleep(0.3)
+                except:
+                    continue
+        except Exception as e:
+            self.logger.warning(f"⚠️  Radio group scan failed: {str(e)}")
+        
+        # Checkboxes
+        try:
+            self.logger.info("🔍 Scanning for unchecked checkboxes...")
+            checkboxes = [
+                inp for inp in self.driver.find_elements(By.CSS_SELECTOR, 'input[type="checkbox"]')
+                if inp.is_displayed() and inp.is_enabled()
+            ]
             
             for checkbox in checkboxes:
                 try:
-                    # Skip if not displayed
-                    if not checkbox.is_displayed():
+                    if checkbox.is_selected():
                         continue
                     
-                    # Skip if disabled or readonly
-                    if checkbox.get_attribute("disabled") or checkbox.get_attribute("readonly"):
-                        continue
+                    is_required = checkbox.get_attribute("required") or (checkbox.get_attribute("aria-required") == "true")
+                    label = self._get_field_label(checkbox) or checkbox.get_attribute("name") or "checkbox"
                     
-                    # Skip CAPTCHA checkboxes (these need manual interaction)
-                    checkbox_id = checkbox.get_attribute("id") or ""
-                    checkbox_class = checkbox.get_attribute("class") or ""
-                    checkbox_name = checkbox.get_attribute("name") or ""
-                    if any(keyword in (checkbox_id + checkbox_class + checkbox_name).lower() 
-                           for keyword in ['captcha', 'recaptcha', 'hcaptcha']):
-                        self.logger.info("⏭️  Skipping CAPTCHA checkbox")
-                        continue
+                    should_check = False
+                    prompt = f"{label}\n\nThis is a checkbox on a job application form. Should it be checked? Respond with 'yes' or 'no' only."
                     
-                    # Get the checkbox label for logging
-                    label = self._get_checkbox_label(checkbox)
-                    if not label:
-                        # Try to get from name or id attribute
-                        if checkbox_name:
-                            label = checkbox_name.replace("_", " ").replace("-", " ").title()
-                        elif checkbox_id:
-                            label = checkbox_id.replace("_", " ").replace("-", " ").title()
-                        else:
-                            label = "Checkbox"
+                    if gpt_available:
+                        try:
+                            answer = self.gpt_filler.get_answer(prompt, self.application_context)
+                            if answer and answer.strip().lower().startswith("y"):
+                                should_check = True
+                        except:
+                            pass
                     
-                    # Check if already checked
-                    is_checked = checkbox.is_selected()
+                    if is_required:
+                        should_check = True
                     
-                    if not is_checked:
-                        # Check the checkbox
+                    if should_check:
                         self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
-                        sleep(0.3)
-                        if not checkbox.is_selected():
+                        sleep(0.2)
+                        try:
                             checkbox.click()
-                            self.logger.success(f"✅ Checked '{label}'")
-                            checked_count += 1
-                            sleep(0.3)
-                    else:
-                        self.logger.info(f"✓ '{label}' is already checked")
-                
-                except Exception as e:
-                    self.logger.warning(f"⚠️  Error processing checkbox: {str(e)}")
-                    continue
-            
-            return checked_count
-            
-        except Exception as e:
-            self.logger.error(f"Error scanning for checkboxes: {str(e)}")
-            return checked_count
-    
-    def _get_checkbox_label(self, checkbox_element) -> str:
-        """Get the label text associated with a checkbox"""
-        try:
-            # Method 1: Find associated label element via 'for' attribute
-            checkbox_id = checkbox_element.get_attribute("id")
-            if checkbox_id:
-                try:
-                    label = self.driver.find_element(By.CSS_SELECTOR, f'label[for="{checkbox_id}"]')
-                    if label and label.text.strip():
-                        return label.text.strip()
+                        except:
+                            self.driver.execute_script("arguments[0].click();", checkbox)
+                        filled_count += 1
+                        self.logger.success(f"✅ Checked box for '{label}'")
+                        sleep(0.2)
                 except:
-                    pass
-            
-            # Method 2: Find label that wraps the checkbox
-            try:
-                parent = checkbox_element.find_element(By.XPATH, "./ancestor::label")
-                if parent and parent.text.strip():
-                    return parent.text.strip()
-            except:
-                pass
-            
-            # Method 3: Find label in parent container
-            try:
-                parent = checkbox_element.find_element(By.XPATH, "./ancestor::div[contains(@class, 'field') or contains(@class, 'form-group')]")
-                label_elem = parent.find_element(By.CSS_SELECTOR, "label")
-                if label_elem and label_elem.text.strip():
-                    return label_elem.text.strip()
-            except:
-                pass
-            
-            # Method 4: Find label by sibling relationship
-            try:
-                parent = checkbox_element.find_element(By.XPATH, "./..")
-                label_elem = parent.find_element(By.CSS_SELECTOR, "label")
-                if label_elem and label_elem.text.strip():
-                    return label_elem.text.strip()
-            except:
-                pass
-            
-            # Method 5: Find by aria-label
-            aria_label = checkbox_element.get_attribute("aria-label")
-            if aria_label and aria_label.strip():
-                return aria_label.strip()
-            
-            # Method 6: Find by title attribute
-            title = checkbox_element.get_attribute("title")
-            if title and title.strip():
-                return title.strip()
-            
-            return ""
-            
+                    continue
         except Exception as e:
-            return ""
+            self.logger.warning(f"⚠️  Checkbox scan failed: {str(e)}")
+        
+        return filled_count
     
     def _handle_otp_verification(self) -> bool:
         """
@@ -2633,4 +2680,3 @@ def run_automation(input_data: dict, enable_gmail_otp: bool = False, gmail_crede
     )
     result = automation.run(application_input)
     return result.to_dict()
-
